@@ -252,7 +252,7 @@ impl GoveeApiClient {
                     DeviceCapabilityKind::DynamicScene
                         | DeviceCapabilityKind::DynamicSetting
                         | DeviceCapabilityKind::Mode
-                );
+                ) && !is_h1310_fan_speed_mode(&device.sku, cap);
                 if !is_scene {
                     continue;
                 }
@@ -668,6 +668,12 @@ struct GetDevicesResponse {
     pub code: u32,
     pub message: String,
     pub data: Vec<HttpDeviceInfo>,
+}
+
+/// The H1310's fan speed is exposed as its own select entity, rather than as a
+/// set of scenes in the light's effect list.
+pub fn is_h1310_fan_speed_mode(sku: &str, cap: &DeviceCapability) -> bool {
+    sku == "H1310" && cap.kind == DeviceCapabilityKind::Mode && cap.instance == "fanSpeedMode"
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -1111,6 +1117,19 @@ mod test {
     use super::*;
 
     const SCENE_LIST: &str = include_str!("../test-data/scenes.json");
+
+    #[test]
+    fn only_the_h1310_fan_speed_mode_is_excluded_from_scenes() {
+        let info: HttpDeviceInfo =
+            from_json(include_str!("../test-data/h1310_fan_speed.json")).unwrap();
+        let cap = info.capability_by_instance("fanSpeedMode").unwrap();
+        assert!(is_h1310_fan_speed_mode("H1310", cap));
+        assert!(!is_h1310_fan_speed_mode("H1370", cap));
+
+        let mut other = cap.clone();
+        other.instance = "nightlightScene".to_string();
+        assert!(!is_h1310_fan_speed_mode("H1310", &other));
+    }
 
     #[test]
     fn get_device_scenes() {

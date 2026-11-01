@@ -1,0 +1,25 @@
+{
+  "capabilities": [
+    {
+      "alarmType": null,
+      "eventState": null,
+      "instance": "fanSpeedMode",
+      "parameters": {
+        "dataType": "ENUM",
+        "options": [
+          { "name": "Speed 1", "value": 1 },
+          { "name": "Speed 2", "value": 2 },
+          { "name": "Speed 3", "value": 3 },
+          { "name": "Speed 4", "value": 4 },
+          { "name": "Speed 5", "value": 5 },
+          { "name": "Speed 6", "value": 6 }
+        ]
+      },
+      "type": "devices.capabilities.mode"
+    }
+  ],
+  "device": "AA:BB:CC:DD:EE:FF:00:01",
+  "deviceName": "Ceiling Fan",
+  "sku": "H1310",
+  "type": "devices.types.light"
+}

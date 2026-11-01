@@ -2,11 +2,13 @@ use crate::ble::NotifyHumidifierNightlightParams;
 use crate::commands::serve::POLL_INTERVAL;
 use crate::lan_api::{DeviceColor, DeviceStatus as LanDeviceStatus, LanDevice};
 use crate::platform_api::{
-    DeviceCapability, DeviceCapabilityState, DeviceType, HttpDeviceInfo, HttpDeviceState,
+    DeviceCapability, DeviceCapabilityState, DeviceParameters, DeviceType, HttpDeviceInfo,
+    HttpDeviceState,
 };
 use crate::service::quirks::{resolve_quirk, Quirk, BULB};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -40,6 +42,9 @@ pub struct Device {
     pub target_humidity_percent: Option<u8>,
     pub humidifier_work_mode: Option<u8>,
     pub humidifier_param_by_mode: HashMap<u8, u8>,
+
+    /// The last known fanSpeedMode value, from a command or a platform poll.
+    pub fan_speed_mode: Option<JsonValue>,
 
     pub last_polled: Option<DateTime<Utc>>,
 
@@ -221,6 +226,15 @@ impl Device {
     }
 
     pub fn set_http_device_state(&mut self, state: HttpDeviceState) {
+        // A poll can return an empty string, which must not hide the speed
+        // from the last command.
+        if let Some(value) = state
+            .capability_by_instance("fanSpeedMode")
+            .and_then(|cap| cap.state.pointer("/value"))
+            .filter(|value| value.is_i64())
+        {
+            self.fan_speed_mode = Some(value.clone());
+        }
         self.http_device_state.replace(state);
         self.last_http_device_state_update.replace(Utc::now());
         self.clear_scene_if_color_changed();
@@ -488,6 +502,18 @@ impl Device {
             .and_then(|info| info.capability_by_instance(instance))
     }
 
+    /// The option name of the last known fan speed, if metadata lists it.
+    pub fn fan_speed_label(&self) -> Option<String> {
+        let value = self.fan_speed_mode.as_ref()?;
+        match &self.get_capability_by_instance("fanSpeedMode")?.parameters {
+            Some(DeviceParameters::Enum { options }) => options
+                .iter()
+                .find(|o| &o.value == value)
+                .map(|o| o.name.clone()),
+            _ => None,
+        }
+    }
+
     pub fn get_state_capability_by_instance(
         &self,
         instance: &str,
@@ -598,6 +624,41 @@ impl Device {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::platform_api::{from_json, DeviceCapabilityKind};
+    use serde_json::json;
+
+    fn h1310_poll_returning(value: JsonValue) -> HttpDeviceState {
+        HttpDeviceState {
+            sku: "H1310".to_string(),
+            device: "AA:BB:CC:DD:EE:FF:00:01".to_string(),
+            capabilities: vec![DeviceCapabilityState {
+                kind: DeviceCapabilityKind::Mode,
+                instance: "fanSpeedMode".to_string(),
+                state: json!({ "value": value }),
+            }],
+        }
+    }
+
+    #[test]
+    fn fan_speed_label_follows_commands_and_polls() {
+        let mut device = Device::new("H1310", "AA:BB:CC:DD:EE:FF:00:01");
+        device.http_device_info =
+            Some(from_json(include_str!("../../test-data/h1310_fan_speed.json")).unwrap());
+        assert_eq!(device.fan_speed_label(), None);
+
+        device.set_http_device_state(h1310_poll_returning(json!(1)));
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 1"));
+
+        // As mqtt_set_fan_speed does after a successful command.
+        device.fan_speed_mode = Some(json!(3));
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 3"));
+
+        device.set_http_device_state(h1310_poll_returning(json!("")));
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 3"));
+
+        device.set_http_device_state(h1310_poll_returning(json!(2)));
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 2"));
+    }
 
     #[test]
     fn name_compute() {
