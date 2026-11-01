@@ -1,5 +1,8 @@
 # Govee to MQTT bridge for Home Assistant
 
+This is a fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt) that adds
+H1310 ceiling fan support. It publishes its own images to `ghcr.io/bojanrajkovic`.
+
 This repo provides a `govee` executable whose primary purpose is to act
 as a bridge between [Govee](https://govee.com) devices and Home Assistant,
 via the [Home Assistant MQTT Integration](https://www.home-assistant.io/integrations/mqtt/).
