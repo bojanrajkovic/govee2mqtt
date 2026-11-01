@@ -3,6 +3,10 @@
 This is a fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt) that adds
 H1310 ceiling fan support. It publishes its own images to `ghcr.io/bojanrajkovic`.
 
+The H1310's light uses LAN, but its fan speed and on/off state are only available
+from the Platform API. The bridge reads them every 60 seconds, which costs about
+1,440 API calls per day for each fan.
+
 This repo provides a `govee` executable whose primary purpose is to act
 as a bridge between [Govee](https://govee.com) devices and Home Assistant,
 via the [Home Assistant MQTT Integration](https://www.home-assistant.io/integrations/mqtt/).

@@ -456,6 +456,13 @@ async fn mqtt_switch_command(
     } else if let Some(client) = state.get_platform_client().await {
         if let Some(http_dev) = &device.http_device_info {
             client.set_toggle_state(http_dev, &instance, on).await?;
+            if instance == "fanToggle" && device.tracks_fan_state() {
+                state
+                    .device_mut(&device.sku, &device.id)
+                    .await
+                    .record_fan_toggle_command(on, chrono::Utc::now());
+                state.notify_of_state_change(&device.id).await?;
+            }
         } else {
             anyhow::bail!("No platform state available to set {id} {instance} to {on}");
         }

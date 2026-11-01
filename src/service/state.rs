@@ -8,6 +8,7 @@ use crate::service::iot::IotClient;
 use crate::temperature::{TemperatureScale, TemperatureValue};
 use crate::undoc_api::GoveeUndocumentedApi;
 use anyhow::Context;
+use chrono::Utc;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -231,6 +232,7 @@ impl State {
             let device_state = device.device_state();
             log::info!("requesting update via Platform API {device} {device_state:?}");
             if let Some(info) = &device.http_device_info {
+                let started = Utc::now();
                 let http_state = client
                     .get_device_state(info)
                     .await
@@ -239,6 +241,7 @@ impl State {
 
                 {
                     let mut device = self.device_mut(&device.sku, &device.id).await;
+                    device.record_fan_poll(&http_state, started);
                     device.set_http_device_state(http_state);
                     device.set_last_polled();
                 }
@@ -253,6 +256,35 @@ impl State {
             );
         }
         Ok(false)
+    }
+
+    pub async fn poll_fan_state(self: &Arc<Self>, device: &Device) -> anyhow::Result<()> {
+        let (Some(client), Some(info)) =
+            (self.get_platform_client().await, &device.http_device_info)
+        else {
+            return Ok(());
+        };
+
+        // The client's own timeout is 60 seconds, and this runs in the loop that
+        // polls every device in turn.
+        let started = Utc::now();
+        let http_state =
+            tokio::time::timeout(Duration::from_secs(8), client.get_device_state(info))
+                .await
+                .context("get_device_state timed out")?
+                .context("get_device_state")?;
+
+        let changed = self
+            .device_mut(&device.sku, &device.id)
+            .await
+            .record_fan_poll(&http_state, started);
+        if changed {
+            self.notify_of_state_change(&device.id)
+                .await
+                .context("state.notify_of_state_change")?;
+        }
+
+        Ok(())
     }
 
     async fn poll_lan_api<F: Fn(&LanDeviceStatus) -> bool>(

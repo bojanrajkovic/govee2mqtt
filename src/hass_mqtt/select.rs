@@ -6,6 +6,7 @@ use crate::service::device::Device as ServiceDevice;
 use crate::service::hass::{availability_topic, topic_safe_id, HassClient, IdParameter};
 use crate::service::state::StateHandle;
 use anyhow::{anyhow, Context};
+use chrono::Utc;
 use mosquitto_rs::router::{Params, Payload, State};
 use serde::Serialize;
 use serde_json::json;
@@ -274,7 +275,7 @@ pub async fn mqtt_set_fan_speed(
     state
         .device_mut(&device.sku, &device.id)
         .await
-        .fan_speed_mode = Some(value);
+        .record_fan_speed_command(value, Utc::now());
     state.notify_of_state_change(&device.id).await?;
 
     Ok(())
