@@ -1,9 +1,10 @@
 use crate::hass_mqtt::climate::mqtt_set_temperature;
 use crate::hass_mqtt::enumerator::{enumerate_all_entites, enumerate_entities_for_device};
+use crate::hass_mqtt::fan::{mqtt_set_fan_percentage, mqtt_set_fan_preset};
 use crate::hass_mqtt::humidifier::{mqtt_device_set_work_mode, mqtt_humidifier_set_target};
 use crate::hass_mqtt::instance::EntityList;
 use crate::hass_mqtt::number::mqtt_number_command;
-use crate::hass_mqtt::select::{mqtt_set_fan_speed, mqtt_set_mode_scene};
+use crate::hass_mqtt::select::mqtt_set_mode_scene;
 use crate::lan_api::DeviceColor;
 use crate::opt_env_var;
 use crate::platform_api::{from_json, DeviceType};
@@ -453,16 +454,11 @@ async fn mqtt_switch_command(
 
     if instance == "powerSwitch" {
         state.device_power_on(&device, on).await?;
+    } else if instance == "fanToggle" && device.tracks_fan_state() {
+        state.device_set_fan_toggle(&device, on).await?;
     } else if let Some(client) = state.get_platform_client().await {
         if let Some(http_dev) = &device.http_device_info {
             client.set_toggle_state(http_dev, &instance, on).await?;
-            if instance == "fanToggle" && device.tracks_fan_state() {
-                state
-                    .device_mut(&device.sku, &device.id)
-                    .await
-                    .record_fan_toggle_command(on, chrono::Utc::now());
-                state.notify_of_state_change(&device.id).await?;
-            }
         } else {
             anyhow::bail!("No platform state available to set {id} {instance} to {on}");
         }
@@ -561,7 +557,10 @@ async fn run_mqtt_loop(
             .route("gv2mqtt/:id/set-work-mode", mqtt_device_set_work_mode)
             .await?;
         router
-            .route("gv2mqtt/:id/set-fan-speed", mqtt_set_fan_speed)
+            .route("gv2mqtt/:id/set-fan-percentage", mqtt_set_fan_percentage)
+            .await?;
+        router
+            .route("gv2mqtt/:id/set-fan-preset", mqtt_set_fan_preset)
             .await?;
         router
             .route(

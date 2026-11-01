@@ -3,6 +3,19 @@
     {
       "alarmType": null,
       "eventState": null,
+      "instance": "fanToggle",
+      "parameters": {
+        "dataType": "ENUM",
+        "options": [
+          { "name": "on", "value": 1 },
+          { "name": "off", "value": 0 }
+        ]
+      },
+      "type": "devices.capabilities.toggle"
+    },
+    {
+      "alarmType": null,
+      "eventState": null,
       "instance": "fanSpeedMode",
       "parameters": {
         "dataType": "ENUM",

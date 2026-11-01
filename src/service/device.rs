@@ -2,8 +2,7 @@ use crate::ble::NotifyHumidifierNightlightParams;
 use crate::commands::serve::{FAN_COMMAND_SETTLE_TIME, FAN_POLL_INTERVAL, POLL_INTERVAL};
 use crate::lan_api::{DeviceColor, DeviceStatus as LanDeviceStatus, LanDevice};
 use crate::platform_api::{
-    DeviceCapability, DeviceCapabilityState, DeviceParameters, DeviceType, HttpDeviceInfo,
-    HttpDeviceState,
+    DeviceCapability, DeviceCapabilityState, DeviceType, HttpDeviceInfo, HttpDeviceState,
 };
 use crate::service::quirks::{resolve_quirk, Quirk, BULB};
 use chrono::{DateTime, Utc};
@@ -558,18 +557,6 @@ impl Device {
         self.last_fan_command = Some(now);
     }
 
-    /// The option name of the last known fan speed, if metadata lists it.
-    pub fn fan_speed_label(&self) -> Option<String> {
-        let value = self.fan_speed_mode.as_ref()?;
-        match &self.get_capability_by_instance("fanSpeedMode")?.parameters {
-            Some(DeviceParameters::Enum { options }) => options
-                .iter()
-                .find(|o| &o.value == value)
-                .map(|o| o.name.clone()),
-            _ => None,
-        }
-    }
-
     pub fn get_state_capability_by_instance(
         &self,
         instance: &str,
@@ -709,13 +696,13 @@ mod test {
     #[test]
     fn fan_poll_sets_speed_and_toggle() {
         let mut device = h1310_fan();
-        assert_eq!(device.fan_speed_label(), None);
+        assert_eq!(device.fan_speed_mode, None);
         assert_eq!(device.fan_toggle_on, None);
 
         let changed = device.record_fan_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
 
         assert!(changed);
-        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 1"));
+        assert_eq!(device.fan_speed_mode, Some(json!(1)));
         assert_eq!(device.fan_toggle_on, Some(false));
     }
 
@@ -742,7 +729,7 @@ mod test {
         let changed = device.record_fan_poll(&h1310_poll(json!(""), json!("")), Utc::now());
 
         assert!(!changed);
-        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 3"));
+        assert_eq!(device.fan_speed_mode, Some(json!(3)));
         assert_eq!(device.fan_toggle_on, Some(true));
     }
 
@@ -754,7 +741,7 @@ mod test {
 
         device.record_fan_speed_command(json!(2), now);
 
-        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 2"));
+        assert_eq!(device.fan_speed_mode, Some(json!(2)));
         assert_eq!(device.fan_toggle_on, Some(true));
     }
 
@@ -767,7 +754,7 @@ mod test {
         device.record_fan_toggle_command(false, now);
 
         assert_eq!(device.fan_toggle_on, Some(false));
-        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 2"));
+        assert_eq!(device.fan_speed_mode, Some(json!(2)));
     }
 
     #[test]
@@ -779,13 +766,13 @@ mod test {
 
         let stale = now + chrono::Duration::seconds(4);
         assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(0)), stale));
-        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 2"));
+        assert_eq!(device.fan_speed_mode, Some(json!(2)));
         assert_eq!(device.fan_toggle_on, Some(true));
 
         // After the window, the device is the authority again.
         let later = now + *FAN_COMMAND_SETTLE_TIME + chrono::Duration::seconds(1);
         assert!(device.record_fan_poll(&h1310_poll(json!(1), json!(0)), later));
-        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 1"));
+        assert_eq!(device.fan_speed_mode, Some(json!(1)));
         assert_eq!(device.fan_toggle_on, Some(false));
     }
 
@@ -798,7 +785,7 @@ mod test {
 
         let started_before_command = now - chrono::Duration::seconds(1);
         assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(0)), started_before_command));
-        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 2"));
+        assert_eq!(device.fan_speed_mode, Some(json!(2)));
         assert_eq!(device.fan_toggle_on, Some(true));
     }
 
