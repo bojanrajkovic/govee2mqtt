@@ -1,12 +1,13 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
 use crate::hass_mqtt::button::ButtonConfig;
 use crate::hass_mqtt::climate::TargetTemperatureEntity;
+use crate::hass_mqtt::fan::FanEntity;
 use crate::hass_mqtt::humidifier::Humidifier;
 use crate::hass_mqtt::instance::EntityList;
 use crate::hass_mqtt::light::DeviceLight;
 use crate::hass_mqtt::number::WorkModeNumber;
 use crate::hass_mqtt::scene::SceneConfig;
-use crate::hass_mqtt::select::{FanSpeedSelect, SceneModeSelect, WorkModeSelect};
+use crate::hass_mqtt::select::{SceneModeSelect, WorkModeSelect};
 use crate::hass_mqtt::sensor::{CapabilitySensor, DeviceStatusDiagnostic, GlobalFixedDiagnostic};
 use crate::hass_mqtt::switch::CapabilitySwitch;
 use crate::hass_mqtt::work_mode::ParsedWorkMode;
@@ -182,8 +183,8 @@ pub async fn enumerate_entities_for_device(
                     entities.add(CapabilitySwitch::new(d, state, cap).await?);
                 }
                 DeviceCapabilityKind::Mode if is_h1310_fan_speed_mode(&d.sku, cap) => {
-                    if let Some(select) = FanSpeedSelect::new(d, state, cap) {
-                        entities.add(select);
+                    if let Some(fan) = FanEntity::new(d, state, cap) {
+                        entities.add(fan);
                     }
                 }
                 DeviceCapabilityKind::ColorSetting

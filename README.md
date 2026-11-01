@@ -5,7 +5,8 @@ H1310 ceiling fan support. It publishes its own images to `ghcr.io/bojanrajkovic
 
 The H1310's light uses LAN, but its fan speed and on/off state are only available
 from the Platform API. The bridge reads them every 60 seconds, which costs about
-1,440 API calls per day for each fan.
+1,440 API calls per day for each fan. Home Assistant shows them as a fan entity
+with six speed presets and a percentage slider, plus the existing fan toggle switch.
 
 This repo provides a `govee` executable whose primary purpose is to act
 as a bridge between [Govee](https://govee.com) devices and Home Assistant,

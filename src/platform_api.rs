@@ -670,8 +670,8 @@ struct GetDevicesResponse {
     pub data: Vec<HttpDeviceInfo>,
 }
 
-/// The H1310's fan speed is exposed as its own select entity, rather than as a
-/// set of scenes in the light's effect list.
+/// The H1310's fan speed is exposed as its own fan entity, rather than as a set
+/// of scenes in the light's effect list.
 pub fn is_h1310_fan_speed_mode(sku: &str, cap: &DeviceCapability) -> bool {
     sku == "H1310" && cap.kind == DeviceCapabilityKind::Mode && cap.instance == "fanSpeedMode"
 }

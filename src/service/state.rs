@@ -258,6 +258,25 @@ impl State {
         Ok(false)
     }
 
+    pub async fn device_set_fan_toggle(
+        self: &Arc<Self>,
+        device: &Device,
+        on: bool,
+    ) -> anyhow::Result<()> {
+        let (Some(client), Some(info)) =
+            (self.get_platform_client().await, &device.http_device_info)
+        else {
+            anyhow::bail!("Unable to use Platform API to set the fan toggle of {device}");
+        };
+
+        client.set_toggle_state(info, "fanToggle", on).await?;
+
+        self.device_mut(&device.sku, &device.id)
+            .await
+            .record_fan_toggle_command(on, Utc::now());
+        self.notify_of_state_change(&device.id).await
+    }
+
     pub async fn poll_fan_state(self: &Arc<Self>, device: &Device) -> anyhow::Result<()> {
         let (Some(client), Some(info)) =
             (self.get_platform_client().await, &device.http_device_info)
