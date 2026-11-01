@@ -106,6 +106,15 @@ impl EntityInstance for CapabilitySwitch {
             return Ok(());
         }
 
+        // Only set for `ServiceDevice::tracks_fan_state` devices.
+        if self.instance_name == "fanToggle" {
+            if let Some(on) = device.fan_toggle_on {
+                return client
+                    .publish(&self.switch.state_topic, if on { "ON" } else { "OFF" })
+                    .await;
+            }
+        }
+
         // TODO: currently, Govee don't return any meaningful data on
         // additional states. When they do, we'll need to start reporting
         // it here, but we'll also need to start polling it from the

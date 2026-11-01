@@ -1,12 +1,14 @@
 use crate::ble::NotifyHumidifierNightlightParams;
-use crate::commands::serve::POLL_INTERVAL;
+use crate::commands::serve::{FAN_COMMAND_SETTLE_TIME, FAN_POLL_INTERVAL, POLL_INTERVAL};
 use crate::lan_api::{DeviceColor, DeviceStatus as LanDeviceStatus, LanDevice};
 use crate::platform_api::{
-    DeviceCapability, DeviceCapabilityState, DeviceType, HttpDeviceInfo, HttpDeviceState,
+    DeviceCapability, DeviceCapabilityState, DeviceParameters, DeviceType, HttpDeviceInfo,
+    HttpDeviceState,
 };
 use crate::service::quirks::{resolve_quirk, Quirk, BULB};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -40,6 +42,15 @@ pub struct Device {
     pub target_humidity_percent: Option<u8>,
     pub humidifier_work_mode: Option<u8>,
     pub humidifier_param_by_mode: HashMap<u8, u8>,
+
+    /// The last known fanSpeedMode value, from a command or a platform poll.
+    pub fan_speed_mode: Option<JsonValue>,
+    /// The last known fanToggle state, from a command or a platform poll.
+    pub fan_toggle_on: Option<bool>,
+    /// When the last fan poll started, whether or not it succeeded.
+    pub last_fan_poll: Option<DateTime<Utc>>,
+    /// When the platform API last accepted a fan command.
+    last_fan_command: Option<DateTime<Utc>>,
 
     pub last_polled: Option<DateTime<Utc>>,
 
@@ -488,6 +499,77 @@ impl Device {
             .and_then(|info| info.capability_by_instance(instance))
     }
 
+    /// True for devices whose light uses LAN while their fan state is only
+    /// available from the platform API.
+    pub fn tracks_fan_state(&self) -> bool {
+        self.sku == "H1310"
+    }
+
+    pub fn fan_poll_due(&self, now: DateTime<Utc>) -> bool {
+        self.tracks_fan_state()
+            && !self
+                .last_fan_poll
+                .is_some_and(|last| now - last < *FAN_POLL_INTERVAL)
+    }
+
+    /// Update fan state from a platform poll, returning true if it changed.
+    ///
+    /// This doesn't touch `http_device_state`, so a fan poll can't replace
+    /// fresher LAN light state. Empty values keep the last known state, and
+    /// a poll that started before a command, or just after one, is ignored
+    /// because it can hold the old state. `started` is when the request began,
+    /// so a slow response can't get past this check.
+    pub fn record_fan_poll(&mut self, state: &HttpDeviceState, started: DateTime<Utc>) -> bool {
+        if !self.tracks_fan_state()
+            || self
+                .last_fan_command
+                .is_some_and(|at| started - at < *FAN_COMMAND_SETTLE_TIME)
+        {
+            return false;
+        }
+
+        let numeric_value = |instance| {
+            state
+                .capability_by_instance(instance)
+                .and_then(|cap| cap.state.pointer("/value"))
+                .filter(|value| value.is_i64())
+        };
+        let speed = numeric_value("fanSpeedMode")
+            .cloned()
+            .or_else(|| self.fan_speed_mode.clone());
+        let toggle = numeric_value("fanToggle")
+            .map(|value| value.as_i64() != Some(0))
+            .or(self.fan_toggle_on);
+
+        let changed = speed != self.fan_speed_mode || toggle != self.fan_toggle_on;
+        self.fan_speed_mode = speed;
+        self.fan_toggle_on = toggle;
+        changed
+    }
+
+    /// Setting a speed also turns the fan on.
+    pub fn record_fan_speed_command(&mut self, value: JsonValue, now: DateTime<Utc>) {
+        self.fan_speed_mode = Some(value);
+        self.record_fan_toggle_command(true, now);
+    }
+
+    pub fn record_fan_toggle_command(&mut self, on: bool, now: DateTime<Utc>) {
+        self.fan_toggle_on = Some(on);
+        self.last_fan_command = Some(now);
+    }
+
+    /// The option name of the last known fan speed, if metadata lists it.
+    pub fn fan_speed_label(&self) -> Option<String> {
+        let value = self.fan_speed_mode.as_ref()?;
+        match &self.get_capability_by_instance("fanSpeedMode")?.parameters {
+            Some(DeviceParameters::Enum { options }) => options
+                .iter()
+                .find(|o| &o.value == value)
+                .map(|o| o.name.clone()),
+            _ => None,
+        }
+    }
+
     pub fn get_state_capability_by_instance(
         &self,
         instance: &str,
@@ -598,6 +680,150 @@ impl Device {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::platform_api::{from_json, DeviceCapabilityKind};
+    use serde_json::json;
+
+    fn h1310_fan() -> Device {
+        let mut device = Device::new("H1310", "AA:BB:CC:DD:EE:FF:00:01");
+        device.http_device_info =
+            Some(from_json(include_str!("../../test-data/h1310_fan_speed.json")).unwrap());
+        device
+    }
+
+    fn h1310_poll(speed: JsonValue, toggle: JsonValue) -> HttpDeviceState {
+        let capability = |kind, instance: &str, value| DeviceCapabilityState {
+            kind,
+            instance: instance.to_string(),
+            state: json!({ "value": value }),
+        };
+        HttpDeviceState {
+            sku: "H1310".to_string(),
+            device: "AA:BB:CC:DD:EE:FF:00:01".to_string(),
+            capabilities: vec![
+                capability(DeviceCapabilityKind::Mode, "fanSpeedMode", speed),
+                capability(DeviceCapabilityKind::Toggle, "fanToggle", toggle),
+            ],
+        }
+    }
+
+    #[test]
+    fn fan_poll_sets_speed_and_toggle() {
+        let mut device = h1310_fan();
+        assert_eq!(device.fan_speed_label(), None);
+        assert_eq!(device.fan_toggle_on, None);
+
+        let changed = device.record_fan_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
+
+        assert!(changed);
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 1"));
+        assert_eq!(device.fan_toggle_on, Some(false));
+    }
+
+    #[test]
+    fn fan_poll_reports_no_change_for_same_values() {
+        let mut device = h1310_fan();
+        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
+        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(0)), Utc::now()));
+    }
+
+    #[test]
+    fn fan_poll_leaves_light_state_alone() {
+        let mut device = h1310_fan();
+        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
+        assert!(device.http_device_state.is_none());
+        assert!(device.last_http_device_state_update.is_none());
+    }
+
+    #[test]
+    fn empty_fan_poll_keeps_last_known_state() {
+        let mut device = h1310_fan();
+        device.record_fan_poll(&h1310_poll(json!(3), json!(1)), Utc::now());
+
+        let changed = device.record_fan_poll(&h1310_poll(json!(""), json!("")), Utc::now());
+
+        assert!(!changed);
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 3"));
+        assert_eq!(device.fan_toggle_on, Some(true));
+    }
+
+    #[test]
+    fn speed_command_marks_fan_on() {
+        let mut device = h1310_fan();
+        let now = Utc::now();
+        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), now);
+
+        device.record_fan_speed_command(json!(2), now);
+
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 2"));
+        assert_eq!(device.fan_toggle_on, Some(true));
+    }
+
+    #[test]
+    fn toggle_command_leaves_speed_alone() {
+        let mut device = h1310_fan();
+        let now = Utc::now();
+        device.record_fan_poll(&h1310_poll(json!(2), json!(1)), now);
+
+        device.record_fan_toggle_command(false, now);
+
+        assert_eq!(device.fan_toggle_on, Some(false));
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 2"));
+    }
+
+    #[test]
+    fn poll_soon_after_command_does_not_restore_old_state() {
+        let mut device = h1310_fan();
+        let now = Utc::now();
+        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), now);
+        device.record_fan_speed_command(json!(2), now);
+
+        let stale = now + chrono::Duration::seconds(4);
+        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(0)), stale));
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 2"));
+        assert_eq!(device.fan_toggle_on, Some(true));
+
+        // After the window, the device is the authority again.
+        let later = now + *FAN_COMMAND_SETTLE_TIME + chrono::Duration::seconds(1);
+        assert!(device.record_fan_poll(&h1310_poll(json!(1), json!(0)), later));
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 1"));
+        assert_eq!(device.fan_toggle_on, Some(false));
+    }
+
+    #[test]
+    fn slow_poll_started_before_command_does_not_restore_old_state() {
+        let mut device = h1310_fan();
+        let now = Utc::now();
+        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), now);
+        device.record_fan_speed_command(json!(2), now);
+
+        let started_before_command = now - chrono::Duration::seconds(1);
+        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(0)), started_before_command));
+        assert_eq!(device.fan_speed_label().as_deref(), Some("Speed 2"));
+        assert_eq!(device.fan_toggle_on, Some(true));
+    }
+
+    #[test]
+    fn fan_poll_due_only_for_h1310_at_the_interval() {
+        let now = Utc::now();
+        let mut device = h1310_fan();
+        assert!(device.fan_poll_due(now));
+
+        device.last_fan_poll = Some(now);
+        assert!(!device.fan_poll_due(now + chrono::Duration::seconds(59)));
+        assert!(device.fan_poll_due(now + *FAN_POLL_INTERVAL));
+
+        let mut other = Device::new("H1370", "aa:bb");
+        other.http_device_info = device.http_device_info.clone();
+        assert!(!other.fan_poll_due(now));
+    }
+
+    #[test]
+    fn other_skus_ignore_fan_state() {
+        let mut device = Device::new("H1370", "aa:bb");
+        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(1)), Utc::now()));
+        assert_eq!(device.fan_speed_mode, None);
+        assert_eq!(device.fan_toggle_on, None);
+    }
 
     #[test]
     fn name_compute() {

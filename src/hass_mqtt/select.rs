@@ -1,10 +1,12 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
 use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
 use crate::hass_mqtt::work_mode::ParsedWorkMode;
+use crate::platform_api::{DeviceCapability, DeviceParameters};
 use crate::service::device::Device as ServiceDevice;
 use crate::service::hass::{availability_topic, topic_safe_id, HassClient, IdParameter};
 use crate::service::state::StateHandle;
-use anyhow::Context;
+use anyhow::{anyhow, Context};
+use chrono::Utc;
 use mosquitto_rs::router::{Params, Payload, State};
 use serde::Serialize;
 use serde_json::json;
@@ -176,6 +178,105 @@ pub async fn mqtt_set_mode_scene(
         .device_set_scene(&device, &scene)
         .await
         .context("mqtt_set_mode_scene: state.device_set_scene")?;
+
+    Ok(())
+}
+
+pub struct FanSpeedSelect {
+    select: SelectConfig,
+    device_id: String,
+    state: StateHandle,
+}
+
+impl FanSpeedSelect {
+    /// Returns None when the capability metadata offers no speeds, because
+    /// hass rejects a select that has no options.
+    pub fn new(
+        device: &ServiceDevice,
+        state: &StateHandle,
+        cap: &DeviceCapability,
+    ) -> Option<Self> {
+        let Some(DeviceParameters::Enum { options }) = &cap.parameters else {
+            return None;
+        };
+        if options.is_empty() {
+            return None;
+        }
+
+        let id = topic_safe_id(device);
+
+        Some(Self {
+            select: SelectConfig {
+                base: EntityConfig {
+                    availability_topic: availability_topic(),
+                    name: Some("Fan Speed".to_string()),
+                    device_class: None,
+                    origin: Origin::default(),
+                    device: Device::for_device(device),
+                    unique_id: format!("gv2mqtt-{id}-fanSpeedMode"),
+                    entity_category: None,
+                    icon: None,
+                },
+                command_topic: format!("gv2mqtt/{id}/set-fan-speed"),
+                state_topic: format!("gv2mqtt/{id}/notify-fan-speed"),
+                options: options.iter().map(|o| o.name.clone()).collect(),
+            },
+            device_id: device.id.to_string(),
+            state: state.clone(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl EntityInstance for FanSpeedSelect {
+    async fn publish_config(&self, state: &StateHandle, client: &HassClient) -> anyhow::Result<()> {
+        self.select.publish(state, client).await
+    }
+
+    async fn notify_state(&self, client: &HassClient) -> anyhow::Result<()> {
+        let device = self
+            .state
+            .device_by_id(&self.device_id)
+            .await
+            .expect("device to exist");
+
+        if let Some(label) = device.fan_speed_label() {
+            client.publish(&self.select.state_topic, label).await?;
+        }
+
+        Ok(())
+    }
+}
+
+pub async fn mqtt_set_fan_speed(
+    Payload(label): Payload<String>,
+    Params(IdParameter { id }): Params<IdParameter>,
+    State(state): State<StateHandle>,
+) -> anyhow::Result<()> {
+    let device = state.resolve_device_for_control(&id).await?;
+
+    let cap = device
+        .get_capability_by_instance("fanSpeedMode")
+        .ok_or_else(|| anyhow!("{id} has no fanSpeedMode"))?;
+    let value = match &cap.parameters {
+        Some(DeviceParameters::Enum { options }) => options
+            .iter()
+            .find(|o| o.name == label)
+            .map(|o| o.value.clone()),
+        _ => None,
+    }
+    .ok_or_else(|| anyhow!("fan speed {label} not found for {id}"))?;
+
+    state
+        .device_control(&device, cap, value.clone())
+        .await
+        .context("mqtt_set_fan_speed: state.device_control")?;
+
+    state
+        .device_mut(&device.sku, &device.id)
+        .await
+        .record_fan_speed_command(value, Utc::now());
+    state.notify_of_state_change(&device.id).await?;
 
     Ok(())
 }
