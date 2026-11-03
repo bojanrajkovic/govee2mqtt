@@ -14,8 +14,9 @@ use serde::Serialize;
 
 /// <https://www.home-assistant.io/integrations/fan.mqtt/>
 ///
-/// The on/off topics are shared with the fanToggle switch, so the fan and the
-/// switch can't disagree. That switch publishes the on/off state.
+/// The fan replaces the fanToggle and reverseAirflowToggle switches. Its on/off
+/// topics are the ones the fanToggle switch used, so the switch command
+/// handler still turns the fan on and off.
 ///
 /// Hass draws a slider rather than buttons for six speeds plus off, so each
 /// speed is also a preset. The speed range is 1-100 so that hass passes
@@ -33,10 +34,19 @@ pub struct FanConfig {
     pub preset_mode_command_topic: String,
     pub preset_mode_state_topic: String,
     pub preset_modes: Vec<String>,
+    /// Only present when the device has a reverseAirflowToggle capability.
+    #[serde(flatten)]
+    pub direction: Option<FanDirectionTopics>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct FanDirectionTopics {
+    pub direction_command_topic: String,
+    pub direction_state_topic: String,
 }
 
 impl FanConfig {
-    fn for_device(device: &ServiceDevice, speeds: &[FanSpeed]) -> Self {
+    fn for_device(device: &ServiceDevice, speeds: &[FanSpeed], has_direction: bool) -> Self {
         let id = topic_safe_id(device);
 
         Self {
@@ -59,7 +69,28 @@ impl FanConfig {
             preset_mode_command_topic: format!("gv2mqtt/{id}/set-fan-preset"),
             preset_mode_state_topic: format!("gv2mqtt/{id}/notify-fan-preset"),
             preset_modes: speeds.iter().map(|s| s.label.clone()).collect(),
+            direction: has_direction.then(|| FanDirectionTopics {
+                direction_command_topic: format!("gv2mqtt/{id}/set-fan-direction"),
+                direction_state_topic: format!("gv2mqtt/{id}/notify-fan-direction"),
+            }),
         }
+    }
+}
+
+/// The H1310 blows down (hass's "forward") while reverseAirflowToggle is on.
+fn fan_direction(reverse_airflow_on: bool) -> &'static str {
+    if reverse_airflow_on {
+        "forward"
+    } else {
+        "reverse"
+    }
+}
+
+fn reverse_airflow_for_direction(direction: &str) -> Option<bool> {
+    match direction {
+        "forward" => Some(true),
+        "reverse" => Some(false),
+        _ => None,
     }
 }
 
@@ -118,8 +149,8 @@ pub struct FanEntity {
     fan: FanConfig,
     speeds: Vec<FanSpeed>,
     device_id: String,
+    topic_id: String,
     state: StateHandle,
-    removed_select_unique_id: String,
 }
 
 impl FanEntity {
@@ -133,32 +164,50 @@ impl FanEntity {
         device.get_capability_by_instance("fanToggle")?;
         let speeds = fan_speeds(cap);
         max_speed(&speeds)?;
+        let has_direction = device
+            .get_capability_by_instance("reverseAirflowToggle")
+            .is_some();
 
         Some(Self {
-            fan: FanConfig::for_device(device, &speeds),
+            fan: FanConfig::for_device(device, &speeds, has_direction),
             speeds,
             device_id: device.id.to_string(),
+            topic_id: topic_safe_id(device),
             state: state.clone(),
-            removed_select_unique_id: format!(
-                "gv2mqtt-{id}-fanSpeedMode",
-                id = topic_safe_id(device)
-            ),
         })
+    }
+
+    /// The toggle capabilities this fan controls, which get no switch entity.
+    pub fn replaced_switch_instances(&self) -> &'static [&'static str] {
+        if self.fan.direction.is_some() {
+            &["fanToggle", "reverseAirflowToggle"]
+        } else {
+            &["fanToggle"]
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl EntityInstance for FanEntity {
     async fn publish_config(&self, state: &StateHandle, client: &HassClient) -> anyhow::Result<()> {
-        // This entity replaced the Fan Speed select. An empty config makes hass
-        // delete the select if it still has it from this session.
+        // This entity replaced the Fan Speed select and the switches it
+        // controls. An empty config makes hass delete each one if it still has
+        // it from this session.
         let disco = state.get_hass_disco_prefix().await;
-        client
-            .publish(
-                format!("{disco}/select/{}/config", self.removed_select_unique_id),
-                "",
-            )
-            .await?;
+        let id = &self.topic_id;
+        let replaced = std::iter::once(("select", "fanSpeedMode")).chain(
+            self.replaced_switch_instances()
+                .iter()
+                .map(|i| ("switch", *i)),
+        );
+        for (integration, instance) in replaced {
+            client
+                .publish(
+                    format!("{disco}/{integration}/gv2mqtt-{id}-{instance}/config"),
+                    "",
+                )
+                .await?;
+        }
 
         publish_entity_config("fan", state, client, &self.fan.base, &self.fan).await
     }
@@ -169,6 +218,23 @@ impl EntityInstance for FanEntity {
             .device_by_id(&self.device_id)
             .await
             .expect("device to exist");
+
+        if let Some(on) = device.fan_toggle_on {
+            client
+                .publish(&self.fan.state_topic, if on { "ON" } else { "OFF" })
+                .await?;
+        }
+
+        if let (Some(topics), Some(reverse_airflow_on)) =
+            (&self.fan.direction, device.fan_reverse_airflow_on)
+        {
+            client
+                .publish(
+                    &topics.direction_state_topic,
+                    fan_direction(reverse_airflow_on),
+                )
+                .await?;
+        }
 
         let Some(speed) = device.fan_speed_mode.as_ref().and_then(|v| v.as_i64()) else {
             return Ok(());
@@ -267,6 +333,18 @@ pub async fn mqtt_set_fan_preset(
     set_fan_speed(&state, &device, cap, speed).await
 }
 
+pub async fn mqtt_set_fan_direction(
+    Payload(direction): Payload<String>,
+    Params(IdParameter { id }): Params<IdParameter>,
+    State(state): State<StateHandle>,
+) -> anyhow::Result<()> {
+    let device = state.resolve_device_for_control(&id).await?;
+    let on = reverse_airflow_for_direction(&direction)
+        .ok_or_else(|| anyhow!("invalid fan direction {direction} for {id}"))?;
+
+    state.device_set_fan_reverse_airflow(&device, on).await
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -325,6 +403,57 @@ mod test {
         ] {
             assert_eq!(config[key], expected, "{key}");
         }
+    }
+
+    #[test]
+    fn direction_topics_follow_the_reverse_airflow_capability() {
+        let (mut device, cap) = h1310();
+        let id = "AABBCCDDEEFF0001";
+
+        let config = serde_json::to_value(&fan_entity(&device, &cap).unwrap().fan).unwrap();
+        assert_eq!(
+            config["direction_command_topic"],
+            json!(format!("gv2mqtt/{id}/set-fan-direction"))
+        );
+        assert_eq!(
+            config["direction_state_topic"],
+            json!(format!("gv2mqtt/{id}/notify-fan-direction"))
+        );
+
+        let info = device.http_device_info.as_mut().unwrap();
+        info.capabilities
+            .retain(|c| c.instance != "reverseAirflowToggle");
+        let config = serde_json::to_value(&fan_entity(&device, &cap).unwrap().fan).unwrap();
+        assert!(config.get("direction_command_topic").is_none());
+        assert!(config.get("direction_state_topic").is_none());
+    }
+
+    #[test]
+    fn fan_replaces_only_the_switches_it_controls() {
+        let (mut device, cap) = h1310();
+        let fan = fan_entity(&device, &cap).unwrap();
+        assert_eq!(
+            fan.replaced_switch_instances(),
+            ["fanToggle", "reverseAirflowToggle"]
+        );
+
+        let info = device.http_device_info.as_mut().unwrap();
+        info.capabilities
+            .retain(|c| c.instance != "reverseAirflowToggle");
+        let fan = fan_entity(&device, &cap).unwrap();
+        assert_eq!(fan.replaced_switch_instances(), ["fanToggle"]);
+    }
+
+    #[test]
+    fn directions_map_to_reverse_airflow() {
+        for (reverse_airflow_on, direction) in [(true, "forward"), (false, "reverse")] {
+            assert_eq!(fan_direction(reverse_airflow_on), direction);
+            assert_eq!(
+                reverse_airflow_for_direction(direction),
+                Some(reverse_airflow_on)
+            );
+        }
+        assert_eq!(reverse_airflow_for_direction("sideways"), None);
     }
 
     #[tokio::test]

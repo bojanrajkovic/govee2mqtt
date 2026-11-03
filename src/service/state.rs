@@ -8,7 +8,7 @@ use crate::service::iot::IotClient;
 use crate::temperature::{TemperatureScale, TemperatureValue};
 use crate::undoc_api::GoveeUndocumentedApi;
 use anyhow::Context;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -263,17 +263,46 @@ impl State {
         device: &Device,
         on: bool,
     ) -> anyhow::Result<()> {
+        self.set_fan_platform_toggle(device, "fanToggle", on, Device::record_fan_toggle_command)
+            .await
+    }
+
+    pub async fn device_set_fan_reverse_airflow(
+        self: &Arc<Self>,
+        device: &Device,
+        on: bool,
+    ) -> anyhow::Result<()> {
+        self.set_fan_platform_toggle(
+            device,
+            "reverseAirflowToggle",
+            on,
+            Device::record_fan_reverse_airflow_command,
+        )
+        .await
+    }
+
+    /// Sends a fan toggle over the Platform API, then records it with `record`
+    /// so that the next poll can't restore the old value.
+    async fn set_fan_platform_toggle(
+        self: &Arc<Self>,
+        device: &Device,
+        instance: &str,
+        on: bool,
+        record: fn(&mut Device, bool, DateTime<Utc>),
+    ) -> anyhow::Result<()> {
         let (Some(client), Some(info)) =
             (self.get_platform_client().await, &device.http_device_info)
         else {
-            anyhow::bail!("Unable to use Platform API to set the fan toggle of {device}");
+            anyhow::bail!("Unable to use Platform API to set {instance} of {device}");
         };
 
-        client.set_toggle_state(info, "fanToggle", on).await?;
+        client.set_toggle_state(info, instance, on).await?;
 
-        self.device_mut(&device.sku, &device.id)
-            .await
-            .record_fan_toggle_command(on, Utc::now());
+        record(
+            &mut *self.device_mut(&device.sku, &device.id).await,
+            on,
+            Utc::now(),
+        );
         self.notify_of_state_change(&device.id).await
     }
 

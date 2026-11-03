@@ -46,6 +46,8 @@ pub struct Device {
     pub fan_speed_mode: Option<JsonValue>,
     /// The last known fanToggle state, from a command or a platform poll.
     pub fan_toggle_on: Option<bool>,
+    /// The last known reverseAirflowToggle state, from a command or a platform poll.
+    pub fan_reverse_airflow_on: Option<bool>,
     /// When the last fan poll started, whether or not it succeeded.
     pub last_fan_poll: Option<DateTime<Utc>>,
     /// When the platform API last accepted a fan command.
@@ -536,13 +538,16 @@ impl Device {
         let speed = numeric_value("fanSpeedMode")
             .cloned()
             .or_else(|| self.fan_speed_mode.clone());
-        let toggle = numeric_value("fanToggle")
-            .map(|value| value.as_i64() != Some(0))
-            .or(self.fan_toggle_on);
+        let is_on = |instance| numeric_value(instance).map(|value| value.as_i64() != Some(0));
+        let toggle = is_on("fanToggle").or(self.fan_toggle_on);
+        let reverse_airflow = is_on("reverseAirflowToggle").or(self.fan_reverse_airflow_on);
 
-        let changed = speed != self.fan_speed_mode || toggle != self.fan_toggle_on;
+        let changed = speed != self.fan_speed_mode
+            || toggle != self.fan_toggle_on
+            || reverse_airflow != self.fan_reverse_airflow_on;
         self.fan_speed_mode = speed;
         self.fan_toggle_on = toggle;
+        self.fan_reverse_airflow_on = reverse_airflow;
         changed
     }
 
@@ -554,6 +559,11 @@ impl Device {
 
     pub fn record_fan_toggle_command(&mut self, on: bool, now: DateTime<Utc>) {
         self.fan_toggle_on = Some(on);
+        self.last_fan_command = Some(now);
+    }
+
+    pub fn record_fan_reverse_airflow_command(&mut self, on: bool, now: DateTime<Utc>) {
+        self.fan_reverse_airflow_on = Some(on);
         self.last_fan_command = Some(now);
     }
 
@@ -704,6 +714,43 @@ mod test {
         assert!(changed);
         assert_eq!(device.fan_speed_mode, Some(json!(1)));
         assert_eq!(device.fan_toggle_on, Some(false));
+    }
+
+    fn with_reverse_airflow(mut poll: HttpDeviceState, value: JsonValue) -> HttpDeviceState {
+        poll.capabilities.push(DeviceCapabilityState {
+            kind: DeviceCapabilityKind::Toggle,
+            instance: "reverseAirflowToggle".to_string(),
+            state: json!({ "value": value }),
+        });
+        poll
+    }
+
+    #[test]
+    fn fan_poll_sets_reverse_airflow() {
+        let mut device = h1310_fan();
+        let poll = with_reverse_airflow(h1310_poll(json!(1), json!(1)), json!(1));
+        device.record_fan_poll(&poll, Utc::now());
+        assert_eq!(device.fan_reverse_airflow_on, Some(true));
+
+        let poll = with_reverse_airflow(h1310_poll(json!(1), json!(1)), json!(0));
+        assert!(device.record_fan_poll(&poll, Utc::now()));
+        assert_eq!(device.fan_reverse_airflow_on, Some(false));
+
+        // A poll without the capability keeps the last known value.
+        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(1)), Utc::now()));
+        assert_eq!(device.fan_reverse_airflow_on, Some(false));
+    }
+
+    #[test]
+    fn poll_soon_after_reverse_airflow_command_is_ignored() {
+        let mut device = h1310_fan();
+        let now = Utc::now();
+        device.record_fan_reverse_airflow_command(true, now);
+
+        let stale = with_reverse_airflow(h1310_poll(json!(1), json!(1)), json!(0));
+        let soon = now + chrono::Duration::seconds(4);
+        assert!(!device.record_fan_poll(&stale, soon));
+        assert_eq!(device.fan_reverse_airflow_on, Some(true));
     }
 
     #[test]
