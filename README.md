@@ -7,7 +7,8 @@ The H1310's light uses LAN, but its fan speed, on/off state and airflow directio
 are only available from the Platform API. The bridge reads them every 60 seconds,
 which costs about 1,440 API calls per day for each fan. Home Assistant shows them
 as one fan entity with on/off, six speed presets, a percentage slider and a
-direction control. Forward means the fan blows down. The fan entity replaces the
+direction control. Forward means the fan blows down, and reverse means it blows
+up, which the Govee app calls "upward". The fan entity replaces the
 Fan Toggle and Reverse Airflow Toggle switches, and direction only appears when
 the device reports a `reverseAirflowToggle` capability.
 

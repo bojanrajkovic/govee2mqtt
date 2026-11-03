@@ -77,19 +77,20 @@ impl FanConfig {
     }
 }
 
-/// The H1310 blows down (hass's "forward") while reverseAirflowToggle is on.
+/// The H1310 blows up (hass's "reverse", the Govee app's "upward") while
+/// reverseAirflowToggle is on, and down ("forward") while it's off.
 fn fan_direction(reverse_airflow_on: bool) -> &'static str {
     if reverse_airflow_on {
-        "forward"
-    } else {
         "reverse"
+    } else {
+        "forward"
     }
 }
 
 fn reverse_airflow_for_direction(direction: &str) -> Option<bool> {
     match direction {
-        "forward" => Some(true),
-        "reverse" => Some(false),
+        "reverse" => Some(true),
+        "forward" => Some(false),
         _ => None,
     }
 }
@@ -446,7 +447,7 @@ mod test {
 
     #[test]
     fn directions_map_to_reverse_airflow() {
-        for (reverse_airflow_on, direction) in [(true, "forward"), (false, "reverse")] {
+        for (reverse_airflow_on, direction) in [(true, "reverse"), (false, "forward")] {
             assert_eq!(fan_direction(reverse_airflow_on), direction);
             assert_eq!(
                 reverse_airflow_for_direction(direction),
