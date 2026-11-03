@@ -177,15 +177,26 @@ pub async fn enumerate_entities_for_device(
     }
 
     if let Some(info) = &d.http_device_info {
+        // The fan entity takes over the toggles it controls, so it's built
+        // before the loop that would add them as switches.
+        let fan = info
+            .capabilities
+            .iter()
+            .find(|cap| is_h1310_fan_speed_mode(&d.sku, cap))
+            .and_then(|cap| FanEntity::new(d, state, cap));
+        let fan_switches = fan
+            .as_ref()
+            .map_or(&[][..], FanEntity::replaced_switch_instances);
+        if let Some(fan) = fan {
+            entities.add(fan);
+        }
+
         for cap in &info.capabilities {
             match &cap.kind {
+                DeviceCapabilityKind::Toggle | DeviceCapabilityKind::OnOff
+                    if fan_switches.contains(&cap.instance.as_str()) => {}
                 DeviceCapabilityKind::Toggle | DeviceCapabilityKind::OnOff => {
                     entities.add(CapabilitySwitch::new(d, state, cap).await?);
-                }
-                DeviceCapabilityKind::Mode if is_h1310_fan_speed_mode(&d.sku, cap) => {
-                    if let Some(fan) = FanEntity::new(d, state, cap) {
-                        entities.add(fan);
-                    }
                 }
                 DeviceCapabilityKind::ColorSetting
                 | DeviceCapabilityKind::SegmentColorSetting

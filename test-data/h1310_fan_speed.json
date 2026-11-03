@@ -29,6 +29,19 @@
         ]
       },
       "type": "devices.capabilities.mode"
+    },
+    {
+      "alarmType": null,
+      "eventState": null,
+      "instance": "reverseAirflowToggle",
+      "parameters": {
+        "dataType": "ENUM",
+        "options": [
+          { "name": "on", "value": 1 },
+          { "name": "off", "value": 0 }
+        ]
+      },
+      "type": "devices.capabilities.toggle"
     }
   ],
   "device": "AA:BB:CC:DD:EE:FF:00:01",

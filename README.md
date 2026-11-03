@@ -3,10 +3,14 @@
 This is a fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt) that adds
 H1310 ceiling fan support. It publishes its own images to `ghcr.io/bojanrajkovic`.
 
-The H1310's light uses LAN, but its fan speed and on/off state are only available
-from the Platform API. The bridge reads them every 60 seconds, which costs about
-1,440 API calls per day for each fan. Home Assistant shows them as a fan entity
-with six speed presets and a percentage slider, plus the existing fan toggle switch.
+The H1310's light uses LAN, but its fan speed, on/off state and airflow direction
+are only available from the Platform API. The bridge reads them every 60 seconds,
+which costs about 1,440 API calls per day for each fan. Home Assistant shows them
+as one fan entity with on/off, six speed presets, a percentage slider and a
+direction control. Forward means the fan blows down, and reverse means it blows
+up, which the Govee app calls "upward". The fan entity replaces the
+Fan Toggle and Reverse Airflow Toggle switches, and direction only appears when
+the device reports a `reverseAirflowToggle` capability.
 
 This repo provides a `govee` executable whose primary purpose is to act
 as a bridge between [Govee](https://govee.com) devices and Home Assistant,
