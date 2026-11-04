@@ -30,6 +30,27 @@ pub async fn publish_entity_config<T: Serialize>(
     client.publish_obj(topic, config).await
 }
 
+/// Publishes an empty config for each `(integration, instance)` entity that
+/// another entity replaced. Hass deletes each one it still has from this
+/// session.
+pub async fn unpublish_replaced_entities(
+    state: &StateHandle,
+    client: &HassClient,
+    topic_id: &str,
+    replaced: &[(&str, &str)],
+) -> anyhow::Result<()> {
+    let disco = state.get_hass_disco_prefix().await;
+    for (integration, instance) in replaced {
+        client
+            .publish(
+                format!("{disco}/{integration}/gv2mqtt-{topic_id}-{instance}/config"),
+                "",
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 #[derive(Default, Clone)]
 pub struct EntityList {
     entities: Vec<Arc<dyn EntityInstance + Send + Sync + 'static>>,

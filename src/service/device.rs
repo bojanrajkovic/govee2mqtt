@@ -1,5 +1,7 @@
 use crate::ble::NotifyHumidifierNightlightParams;
-use crate::commands::serve::{FAN_COMMAND_SETTLE_TIME, FAN_POLL_INTERVAL, POLL_INTERVAL};
+use crate::commands::serve::{
+    PLATFORM_COMMAND_SETTLE_TIME, PLATFORM_STATE_POLL_INTERVAL, POLL_INTERVAL,
+};
 use crate::lan_api::{DeviceColor, DeviceStatus as LanDeviceStatus, LanDevice};
 use crate::platform_api::{
     DeviceCapability, DeviceCapabilityState, DeviceType, HttpDeviceInfo, HttpDeviceState,
@@ -48,10 +50,14 @@ pub struct Device {
     pub fan_toggle_on: Option<bool>,
     /// The last known reverseAirflowToggle state, from a command or a platform poll.
     pub fan_reverse_airflow_on: Option<bool>,
-    /// When the last fan poll started, whether or not it succeeded.
-    pub last_fan_poll: Option<DateTime<Utc>>,
-    /// When the platform API last accepted a fan command.
-    last_fan_command: Option<DateTime<Utc>>,
+    /// The last known mainLightToggle state, from a command or a platform poll.
+    pub main_light_on: Option<bool>,
+    /// The last known backgroundLightToggle state, from a command or a platform poll.
+    pub background_light_on: Option<bool>,
+    /// When the last platform state poll started, whether or not it succeeded.
+    pub last_platform_state_poll: Option<DateTime<Utc>>,
+    /// When the platform API last accepted a command from the bridge.
+    last_platform_command: Option<DateTime<Utc>>,
 
     pub last_polled: Option<DateTime<Utc>>,
 
@@ -500,31 +506,36 @@ impl Device {
             .and_then(|info| info.capability_by_instance(instance))
     }
 
-    /// True for devices whose light uses LAN while their fan state is only
-    /// available from the platform API.
-    pub fn tracks_fan_state(&self) -> bool {
+    /// True for devices with state that only the Platform API reports: the
+    /// H1310's fan, and which of its two lights is on.
+    pub fn polls_platform_state(&self) -> bool {
         self.sku == "H1310"
     }
 
-    pub fn fan_poll_due(&self, now: DateTime<Utc>) -> bool {
-        self.tracks_fan_state()
+    pub fn platform_state_poll_due(&self, now: DateTime<Utc>) -> bool {
+        self.polls_platform_state()
             && !self
-                .last_fan_poll
-                .is_some_and(|last| now - last < *FAN_POLL_INTERVAL)
+                .last_platform_state_poll
+                .is_some_and(|last| now - last < *PLATFORM_STATE_POLL_INTERVAL)
     }
 
-    /// Update fan state from a platform poll, returning true if it changed.
+    /// Update fan and light state from a platform poll, returning true if it
+    /// changed.
     ///
-    /// This doesn't touch `http_device_state`, so a fan poll can't replace
-    /// fresher LAN light state. Empty values keep the last known state, and
+    /// This doesn't touch `http_device_state`, so a poll can't replace
+    /// fresher LAN state. Empty values keep the last known state, and
     /// a poll that started before a command, or just after one, is ignored
     /// because it can hold the old state. `started` is when the request began,
     /// so a slow response can't get past this check.
-    pub fn record_fan_poll(&mut self, state: &HttpDeviceState, started: DateTime<Utc>) -> bool {
-        if !self.tracks_fan_state()
+    pub fn record_platform_state_poll(
+        &mut self,
+        state: &HttpDeviceState,
+        started: DateTime<Utc>,
+    ) -> bool {
+        if !self.polls_platform_state()
             || self
-                .last_fan_command
-                .is_some_and(|at| started - at < *FAN_COMMAND_SETTLE_TIME)
+                .last_platform_command
+                .is_some_and(|at| started - at < *PLATFORM_COMMAND_SETTLE_TIME)
         {
             return false;
         }
@@ -541,14 +552,59 @@ impl Device {
         let is_on = |instance| numeric_value(instance).map(|value| value.as_i64() != Some(0));
         let toggle = is_on("fanToggle").or(self.fan_toggle_on);
         let reverse_airflow = is_on("reverseAirflowToggle").or(self.fan_reverse_airflow_on);
+        let main_light = is_on("mainLightToggle").or(self.main_light_on);
+        let background_light = is_on("backgroundLightToggle").or(self.background_light_on);
 
         let changed = speed != self.fan_speed_mode
             || toggle != self.fan_toggle_on
-            || reverse_airflow != self.fan_reverse_airflow_on;
+            || reverse_airflow != self.fan_reverse_airflow_on
+            || main_light != self.main_light_on
+            || background_light != self.background_light_on;
         self.fan_speed_mode = speed;
         self.fan_toggle_on = toggle;
         self.fan_reverse_airflow_on = reverse_airflow;
+        self.main_light_on = main_light;
+        self.background_light_on = background_light;
         changed
+    }
+
+    /// True for devices that hass shows as two lights, one per half. Only the
+    /// Platform API can address one half, and only its poll reports which
+    /// half is on. Each half needs its toggle and the segment controls.
+    pub fn has_split_lights(&self) -> bool {
+        self.polls_platform_state()
+            && SplitHalf::ALL
+                .map(SplitHalf::toggle_instance)
+                .into_iter()
+                .chain(["segmentedBrightness", "segmentedColorRgb"])
+                .all(|instance| self.get_capability_by_instance(instance).is_some())
+    }
+
+    pub fn split_light_on(&self, half: SplitHalf) -> Option<bool> {
+        match half {
+            SplitHalf::Main => self.main_light_on,
+            SplitHalf::Background => self.background_light_on,
+        }
+    }
+
+    fn split_light_on_mut(&mut self, half: SplitHalf) -> &mut Option<bool> {
+        match half {
+            SplitHalf::Main => &mut self.main_light_on,
+            SplitHalf::Background => &mut self.background_light_on,
+        }
+    }
+
+    pub fn record_split_light_command(&mut self, half: SplitHalf, on: bool, now: DateTime<Utc>) {
+        *self.split_light_on_mut(half) = Some(on);
+        self.last_platform_command = Some(now);
+    }
+
+    /// Marks a half's state as unknown, before a command that may change it as
+    /// a side effect. Polls that started before the command are ignored, so
+    /// the next poll after it fills the state in.
+    pub fn forget_split_light_state(&mut self, half: SplitHalf, now: DateTime<Utc>) {
+        *self.split_light_on_mut(half) = None;
+        self.last_platform_command = Some(now);
     }
 
     /// Setting a speed also turns the fan on.
@@ -559,12 +615,12 @@ impl Device {
 
     pub fn record_fan_toggle_command(&mut self, on: bool, now: DateTime<Utc>) {
         self.fan_toggle_on = Some(on);
-        self.last_fan_command = Some(now);
+        self.last_platform_command = Some(now);
     }
 
     pub fn record_fan_reverse_airflow_command(&mut self, on: bool, now: DateTime<Utc>) {
         self.fan_reverse_airflow_on = Some(on);
-        self.last_fan_command = Some(now);
+        self.last_platform_command = Some(now);
     }
 
     pub fn get_state_capability_by_instance(
@@ -599,18 +655,16 @@ impl Device {
     }
 
     pub fn get_color_temperature_range(&self) -> Option<(u32, u32)> {
-        if let Some(quirk) = self.resolve_quirk() {
+        if let Some(quirk) = resolve_quirk(&self.sku) {
             return quirk.color_temp_range;
         }
 
-        if self.lan_device.is_some() {
-            // LAN API support suggests that it is a light
-            return Some((2000, 9000));
-        }
-
+        // The device's own range beats the guess in the placeholder quirk that
+        // `resolve_quirk` makes for unknown LAN devices.
         self.http_device_info
             .as_ref()
             .and_then(|info| info.get_color_temperature_range())
+            .or_else(|| self.resolve_quirk()?.color_temp_range)
     }
 
     pub fn supports_brightness(&self) -> bool {
@@ -674,6 +728,55 @@ impl Device {
     }
 }
 
+/// One of the H1310's two lights. Each has its own on/off toggle and its own
+/// segments for brightness and color. Color temperature and scenes have no
+/// per-half control, and setting either one changes both halves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitHalf {
+    Main,
+    Background,
+}
+
+impl SplitHalf {
+    pub const ALL: [Self; 2] = [Self::Main, Self::Background];
+
+    pub fn toggle_instance(self) -> &'static str {
+        match self {
+            Self::Main => "mainLightToggle",
+            Self::Background => "backgroundLightToggle",
+        }
+    }
+
+    /// Segment 0 is the whole main light. Segments 1-8 are the background
+    /// ring, in eight equal pieces.
+    pub fn segments(self) -> &'static [u32] {
+        match self {
+            Self::Main => &[0],
+            Self::Background => &[1, 2, 3, 4, 5, 6, 7, 8],
+        }
+    }
+
+    /// The other half, which a color temperature or scene change also affects.
+    pub fn other(self) -> Self {
+        match self {
+            Self::Main => Self::Background,
+            Self::Background => Self::Main,
+        }
+    }
+
+    /// The name used in MQTT topics and unique ids.
+    pub fn topic_name(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Background => "background",
+        }
+    }
+
+    pub fn from_topic_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|half| half.topic_name() == name)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -683,7 +786,7 @@ mod test {
     fn h1310_fan() -> Device {
         let mut device = Device::new("H1310", "AA:BB:CC:DD:EE:FF:00:01");
         device.http_device_info =
-            Some(from_json(include_str!("../../test-data/h1310_fan_speed.json")).unwrap());
+            Some(from_json(include_str!("../../test-data/h1310.json")).unwrap());
         device
     }
 
@@ -709,7 +812,8 @@ mod test {
         assert_eq!(device.fan_speed_mode, None);
         assert_eq!(device.fan_toggle_on, None);
 
-        let changed = device.record_fan_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
+        let changed =
+            device.record_platform_state_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
 
         assert!(changed);
         assert_eq!(device.fan_speed_mode, Some(json!(1)));
@@ -729,15 +833,15 @@ mod test {
     fn fan_poll_sets_reverse_airflow() {
         let mut device = h1310_fan();
         let poll = with_reverse_airflow(h1310_poll(json!(1), json!(1)), json!(1));
-        device.record_fan_poll(&poll, Utc::now());
+        device.record_platform_state_poll(&poll, Utc::now());
         assert_eq!(device.fan_reverse_airflow_on, Some(true));
 
         let poll = with_reverse_airflow(h1310_poll(json!(1), json!(1)), json!(0));
-        assert!(device.record_fan_poll(&poll, Utc::now()));
+        assert!(device.record_platform_state_poll(&poll, Utc::now()));
         assert_eq!(device.fan_reverse_airflow_on, Some(false));
 
         // A poll without the capability keeps the last known value.
-        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(1)), Utc::now()));
+        assert!(!device.record_platform_state_poll(&h1310_poll(json!(1), json!(1)), Utc::now()));
         assert_eq!(device.fan_reverse_airflow_on, Some(false));
     }
 
@@ -749,21 +853,21 @@ mod test {
 
         let stale = with_reverse_airflow(h1310_poll(json!(1), json!(1)), json!(0));
         let soon = now + chrono::Duration::seconds(4);
-        assert!(!device.record_fan_poll(&stale, soon));
+        assert!(!device.record_platform_state_poll(&stale, soon));
         assert_eq!(device.fan_reverse_airflow_on, Some(true));
     }
 
     #[test]
     fn fan_poll_reports_no_change_for_same_values() {
         let mut device = h1310_fan();
-        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
-        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(0)), Utc::now()));
+        device.record_platform_state_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
+        assert!(!device.record_platform_state_poll(&h1310_poll(json!(1), json!(0)), Utc::now()));
     }
 
     #[test]
     fn fan_poll_leaves_light_state_alone() {
         let mut device = h1310_fan();
-        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
+        device.record_platform_state_poll(&h1310_poll(json!(1), json!(0)), Utc::now());
         assert!(device.http_device_state.is_none());
         assert!(device.last_http_device_state_update.is_none());
     }
@@ -771,9 +875,10 @@ mod test {
     #[test]
     fn empty_fan_poll_keeps_last_known_state() {
         let mut device = h1310_fan();
-        device.record_fan_poll(&h1310_poll(json!(3), json!(1)), Utc::now());
+        device.record_platform_state_poll(&h1310_poll(json!(3), json!(1)), Utc::now());
 
-        let changed = device.record_fan_poll(&h1310_poll(json!(""), json!("")), Utc::now());
+        let changed =
+            device.record_platform_state_poll(&h1310_poll(json!(""), json!("")), Utc::now());
 
         assert!(!changed);
         assert_eq!(device.fan_speed_mode, Some(json!(3)));
@@ -784,7 +889,7 @@ mod test {
     fn speed_command_marks_fan_on() {
         let mut device = h1310_fan();
         let now = Utc::now();
-        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), now);
+        device.record_platform_state_poll(&h1310_poll(json!(1), json!(0)), now);
 
         device.record_fan_speed_command(json!(2), now);
 
@@ -796,7 +901,7 @@ mod test {
     fn toggle_command_leaves_speed_alone() {
         let mut device = h1310_fan();
         let now = Utc::now();
-        device.record_fan_poll(&h1310_poll(json!(2), json!(1)), now);
+        device.record_platform_state_poll(&h1310_poll(json!(2), json!(1)), now);
 
         device.record_fan_toggle_command(false, now);
 
@@ -808,17 +913,17 @@ mod test {
     fn poll_soon_after_command_does_not_restore_old_state() {
         let mut device = h1310_fan();
         let now = Utc::now();
-        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), now);
+        device.record_platform_state_poll(&h1310_poll(json!(1), json!(0)), now);
         device.record_fan_speed_command(json!(2), now);
 
         let stale = now + chrono::Duration::seconds(4);
-        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(0)), stale));
+        assert!(!device.record_platform_state_poll(&h1310_poll(json!(1), json!(0)), stale));
         assert_eq!(device.fan_speed_mode, Some(json!(2)));
         assert_eq!(device.fan_toggle_on, Some(true));
 
         // After the window, the device is the authority again.
-        let later = now + *FAN_COMMAND_SETTLE_TIME + chrono::Duration::seconds(1);
-        assert!(device.record_fan_poll(&h1310_poll(json!(1), json!(0)), later));
+        let later = now + *PLATFORM_COMMAND_SETTLE_TIME + chrono::Duration::seconds(1);
+        assert!(device.record_platform_state_poll(&h1310_poll(json!(1), json!(0)), later));
         assert_eq!(device.fan_speed_mode, Some(json!(1)));
         assert_eq!(device.fan_toggle_on, Some(false));
     }
@@ -827,36 +932,124 @@ mod test {
     fn slow_poll_started_before_command_does_not_restore_old_state() {
         let mut device = h1310_fan();
         let now = Utc::now();
-        device.record_fan_poll(&h1310_poll(json!(1), json!(0)), now);
+        device.record_platform_state_poll(&h1310_poll(json!(1), json!(0)), now);
         device.record_fan_speed_command(json!(2), now);
 
         let started_before_command = now - chrono::Duration::seconds(1);
-        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(0)), started_before_command));
+        assert!(!device
+            .record_platform_state_poll(&h1310_poll(json!(1), json!(0)), started_before_command));
         assert_eq!(device.fan_speed_mode, Some(json!(2)));
         assert_eq!(device.fan_toggle_on, Some(true));
     }
 
     #[test]
-    fn fan_poll_due_only_for_h1310_at_the_interval() {
+    fn platform_state_poll_due_only_for_h1310_at_the_interval() {
         let now = Utc::now();
         let mut device = h1310_fan();
-        assert!(device.fan_poll_due(now));
+        assert!(device.platform_state_poll_due(now));
 
-        device.last_fan_poll = Some(now);
-        assert!(!device.fan_poll_due(now + chrono::Duration::seconds(59)));
-        assert!(device.fan_poll_due(now + *FAN_POLL_INTERVAL));
+        device.last_platform_state_poll = Some(now);
+        assert!(!device.platform_state_poll_due(now + chrono::Duration::seconds(59)));
+        assert!(device.platform_state_poll_due(now + *PLATFORM_STATE_POLL_INTERVAL));
 
         let mut other = Device::new("H1370", "aa:bb");
         other.http_device_info = device.http_device_info.clone();
-        assert!(!other.fan_poll_due(now));
+        assert!(!other.platform_state_poll_due(now));
     }
 
     #[test]
     fn other_skus_ignore_fan_state() {
         let mut device = Device::new("H1370", "aa:bb");
-        assert!(!device.record_fan_poll(&h1310_poll(json!(1), json!(1)), Utc::now()));
+        assert!(!device.record_platform_state_poll(&h1310_poll(json!(1), json!(1)), Utc::now()));
         assert_eq!(device.fan_speed_mode, None);
         assert_eq!(device.fan_toggle_on, None);
+    }
+
+    fn with_light_toggles(
+        mut poll: HttpDeviceState,
+        main: JsonValue,
+        background: JsonValue,
+    ) -> HttpDeviceState {
+        for (half, value) in [(SplitHalf::Main, main), (SplitHalf::Background, background)] {
+            poll.capabilities.push(DeviceCapabilityState {
+                kind: DeviceCapabilityKind::Toggle,
+                instance: half.toggle_instance().to_string(),
+                state: json!({ "value": value }),
+            });
+        }
+        poll
+    }
+
+    #[test]
+    fn platform_state_poll_sets_split_lights() {
+        let mut device = h1310_fan();
+        assert!(device.has_split_lights());
+
+        let poll = with_light_toggles(h1310_poll(json!(1), json!(1)), json!(1), json!(0));
+        assert!(device.record_platform_state_poll(&poll, Utc::now()));
+        assert_eq!(device.split_light_on(SplitHalf::Main), Some(true));
+        assert_eq!(device.split_light_on(SplitHalf::Background), Some(false));
+
+        // The Platform API sometimes returns empty values.
+        let poll = with_light_toggles(h1310_poll(json!(1), json!(1)), json!(""), json!(""));
+        assert!(!device.record_platform_state_poll(&poll, Utc::now()));
+        assert_eq!(device.split_light_on(SplitHalf::Main), Some(true));
+        assert_eq!(device.split_light_on(SplitHalf::Background), Some(false));
+    }
+
+    #[test]
+    fn poll_soon_after_split_light_command_is_ignored() {
+        let mut device = h1310_fan();
+        let now = Utc::now();
+        device.record_split_light_command(SplitHalf::Background, true, now);
+
+        let stale = with_light_toggles(h1310_poll(json!(1), json!(1)), json!(1), json!(0));
+        assert!(!device.record_platform_state_poll(&stale, now));
+        assert_eq!(device.split_light_on(SplitHalf::Background), Some(true));
+
+        // A scene or color temperature change on the main light.
+        device.forget_split_light_state(SplitHalf::Background, now);
+        assert!(!device.record_platform_state_poll(&stale, now));
+        assert_eq!(device.split_light_on(SplitHalf::Background), None);
+    }
+
+    #[test]
+    fn split_lights_need_both_toggles() {
+        let mut device = h1310_fan();
+        let info = device.http_device_info.as_mut().unwrap();
+        info.capabilities
+            .retain(|c| c.instance != "backgroundLightToggle");
+        assert!(!device.has_split_lights());
+
+        let mut device = h1310_fan();
+        let info = device.http_device_info.as_mut().unwrap();
+        info.capabilities
+            .retain(|c| c.instance != "segmentedColorRgb");
+        assert!(!device.has_split_lights());
+
+        let mut other = h1310_fan();
+        other.sku = "H1370".to_string();
+        assert!(!other.has_split_lights());
+    }
+
+    #[test]
+    fn lan_device_uses_reported_color_temperature_range() {
+        let mut device = h1310_fan();
+        device.lan_device = Some(
+            serde_json::from_value(json!({
+                "device": device.id,
+                "sku": "H1310",
+                "bleVersionHard": "",
+                "bleVersionSoft": "",
+                "wifiVersionHard": "",
+                "wifiVersionSoft": "",
+            }))
+            .unwrap(),
+        );
+        assert_eq!(device.get_color_temperature_range(), Some((2700, 6500)));
+
+        device.http_device_info = None;
+        assert_eq!(device.get_color_temperature_range(), Some((2000, 9000)));
     }
 
     #[test]

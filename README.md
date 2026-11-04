@@ -3,14 +3,43 @@
 This is a fork of [wez/govee2mqtt](https://github.com/wez/govee2mqtt) that adds
 H1310 ceiling fan support. It publishes its own images to `ghcr.io/bojanrajkovic`.
 
-The H1310's light uses LAN, but its fan speed, on/off state and airflow direction
-are only available from the Platform API. The bridge reads them every 60 seconds,
-which costs about 1,440 API calls per day for each fan. Home Assistant shows them
+The H1310's fan speed, on/off state and airflow direction are only available
+from the Platform API. So is which of its two lights is on. The bridge reads
+them every 60 seconds, which costs about 1,440 API calls per day for each fan.
+Home Assistant shows the fan state
 as one fan entity with on/off, six speed presets, a percentage slider and a
 direction control. Forward means the fan blows down, and reverse means it blows
 up, which the Govee app calls "upward". The fan entity replaces the
 Fan Toggle and Reverse Airflow Toggle switches, and direction only appears when
 the device reports a `reverseAirflowToggle` capability.
+
+The H1310 has a main light and a background ring, and Home Assistant shows each
+as its own light. Each one turns on and off with its own toggle, and the device
+turns its power on and off to match. The two lights replace the Power Switch,
+Main Light Toggle and Background Light Toggle switches.
+
+```mermaid
+flowchart LR
+    Main["Main Light"] -->|mainLightToggle| S0["segment 0"]
+    Background["Background Light"] -->|backgroundLightToggle| S1["segments 1-8"]
+    Main -->|color temperature, scenes| Both["both lights"]
+```
+
+- Brightness and color are set per light, through the Platform API's segment
+  controls. Segment 0 is the whole main light. Segments 1-8 are the ring, in
+  eight equal pieces.
+- Color temperature and scenes only appear on the main light, because the
+  device has no per-light control for them. Setting either one changes the
+  background ring too, so its state shows as unknown until the next poll.
+- All light commands go through the Platform API, which takes a few seconds.
+  LAN can't address one light. Scenes keep their usual path, which tries the
+  Platform API first and falls back to LAN.
+- The Platform API reports which light is on, but not its brightness or color.
+  Home Assistant shows the values it last sent, and shows none after it
+  restarts until you set them again.
+- The nine segment lights are still published, but start disabled. Home
+  Assistant only applies that when it first creates an entity, so segment
+  lights it already has stay enabled until you disable them.
 
 This repo provides a `govee` executable whose primary purpose is to act
 as a bridge between [Govee](https://govee.com) devices and Home Assistant,

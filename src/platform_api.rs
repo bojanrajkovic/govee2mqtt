@@ -488,7 +488,7 @@ impl GoveeApiClient {
     pub async fn set_segment_rgb(
         &self,
         device: &HttpDeviceInfo,
-        segment: u32,
+        segments: &[u32],
         r: u8,
         g: u8,
         b: u8,
@@ -501,7 +501,7 @@ impl GoveeApiClient {
             device,
             cap,
             json!({
-                "segment": vec![segment],
+                "segment": segments,
                 "rgb": value,
             }),
         )
@@ -511,7 +511,7 @@ impl GoveeApiClient {
     pub async fn set_segment_brightness(
         &self,
         device: &HttpDeviceInfo,
-        segment: u32,
+        segments: &[u32],
         percent: u8,
     ) -> anyhow::Result<ControlDeviceResponseCapability> {
         let cap = device
@@ -528,7 +528,7 @@ impl GoveeApiClient {
             device,
             cap,
             json!({
-                "segment": vec![segment],
+                "segment": segments,
                 "brightness": value,
             }),
         )
@@ -1120,8 +1120,7 @@ mod test {
 
     #[test]
     fn only_the_h1310_fan_speed_mode_is_excluded_from_scenes() {
-        let info: HttpDeviceInfo =
-            from_json(include_str!("../test-data/h1310_fan_speed.json")).unwrap();
+        let info: HttpDeviceInfo = from_json(include_str!("../test-data/h1310.json")).unwrap();
         let cap = info.capability_by_instance("fanSpeedMode").unwrap();
         assert!(is_h1310_fan_speed_mode("H1310", cap));
         assert!(!is_h1310_fan_speed_mode("H1370", cap));

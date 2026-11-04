@@ -4,7 +4,7 @@ use crate::hass_mqtt::climate::TargetTemperatureEntity;
 use crate::hass_mqtt::fan::FanEntity;
 use crate::hass_mqtt::humidifier::Humidifier;
 use crate::hass_mqtt::instance::EntityList;
-use crate::hass_mqtt::light::DeviceLight;
+use crate::hass_mqtt::light::{DeviceLight, LightTarget, SPLIT_LIGHT_REPLACED_SWITCHES};
 use crate::hass_mqtt::number::WorkModeNumber;
 use crate::hass_mqtt::scene::SceneConfig;
 use crate::hass_mqtt::select::{SceneModeSelect, WorkModeSelect};
@@ -14,7 +14,7 @@ use crate::hass_mqtt::work_mode::ParsedWorkMode;
 use crate::platform_api::{
     is_h1310_fan_speed_mode, DeviceCapability, DeviceCapabilityKind, DeviceType,
 };
-use crate::service::device::Device as ServiceDevice;
+use crate::service::device::{Device as ServiceDevice, SplitHalf};
 use crate::service::hass::{availability_topic, oneclick_topic, purge_cache_topic};
 use crate::service::state::StateHandle;
 use crate::version_info::govee_version;
@@ -159,8 +159,16 @@ pub async fn enumerate_entities_for_device(
     entities.add(DeviceStatusDiagnostic::new(d, state));
     entities.add(ButtonConfig::request_platform_data_for_device(d));
 
-    if d.supports_rgb() || d.get_color_temperature_range().is_some() || d.supports_brightness() {
-        entities.add(DeviceLight::for_device(d, state, None).await?);
+    let split_lights = d.has_split_lights();
+    if split_lights {
+        for half in SplitHalf::ALL {
+            entities.add(DeviceLight::for_device(d, state, LightTarget::Half(half)).await?);
+        }
+    } else if d.supports_rgb()
+        || d.get_color_temperature_range().is_some()
+        || d.supports_brightness()
+    {
+        entities.add(DeviceLight::for_device(d, state, LightTarget::Device).await?);
     }
 
     if matches!(
@@ -195,6 +203,9 @@ pub async fn enumerate_entities_for_device(
             match &cap.kind {
                 DeviceCapabilityKind::Toggle | DeviceCapabilityKind::OnOff
                     if fan_switches.contains(&cap.instance.as_str()) => {}
+                DeviceCapabilityKind::Toggle | DeviceCapabilityKind::OnOff
+                    if split_lights
+                        && SPLIT_LIGHT_REPLACED_SWITCHES.contains(&cap.instance.as_str()) => {}
                 DeviceCapabilityKind::Toggle | DeviceCapabilityKind::OnOff => {
                     entities.add(CapabilitySwitch::new(d, state, cap).await?);
                 }
@@ -230,7 +241,7 @@ pub async fn enumerate_entities_for_device(
 
         if let Some(segments) = info.supports_segmented_rgb() {
             for n in segments {
-                entities.add(DeviceLight::for_device(d, state, Some(n)).await?);
+                entities.add(DeviceLight::for_device(d, state, LightTarget::Segment(n)).await?);
             }
         }
     }
