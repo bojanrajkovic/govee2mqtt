@@ -16,12 +16,13 @@ use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 pub static POLL_INTERVAL: Lazy<chrono::Duration> = Lazy::new(|| chrono::Duration::seconds(900));
-/// How often to read fan state for `Device::tracks_fan_state` devices. This
+/// How often to read platform state for `Device::polls_platform_state` devices. This
 /// costs about 1,440 platform API calls per day for each one.
-pub static FAN_POLL_INTERVAL: Lazy<chrono::Duration> = Lazy::new(|| chrono::Duration::seconds(60));
-/// How long to ignore fan polls after a command. The H1310 took about 4 seconds
+pub static PLATFORM_STATE_POLL_INTERVAL: Lazy<chrono::Duration> =
+    Lazy::new(|| chrono::Duration::seconds(60));
+/// How long to ignore platform state polls after a command. The H1310 took about 4 seconds
 /// to report a change when measured.
-pub static FAN_COMMAND_SETTLE_TIME: Lazy<chrono::Duration> =
+pub static PLATFORM_COMMAND_SETTLE_TIME: Lazy<chrono::Duration> =
     Lazy::new(|| chrono::Duration::seconds(10));
 
 #[derive(clap::Parser, Debug)]
@@ -59,14 +60,14 @@ async fn poll_single_device(state: &StateHandle, device: &Device) -> anyhow::Res
         }
     }
 
-    if device.fan_poll_due(now) {
+    if device.platform_state_poll_due(now) {
         // Record the attempt first, so a failure waits for the full interval.
         state
             .device_mut(&device.sku, &device.id)
             .await
-            .last_fan_poll = Some(now);
-        if let Err(err) = state.poll_fan_state(device).await {
-            log::error!("while polling fan state for {device}: {err:#}");
+            .last_platform_state_poll = Some(now);
+        if let Err(err) = state.poll_platform_state(device).await {
+            log::error!("while polling platform state for {device}: {err:#}");
         }
     }
 

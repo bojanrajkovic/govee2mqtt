@@ -106,7 +106,7 @@ impl EntityInstance for CapabilitySwitch {
             return Ok(());
         }
 
-        // Only set for `ServiceDevice::tracks_fan_state` devices.
+        // Only set for `ServiceDevice::polls_platform_state` devices.
         if self.instance_name == "fanToggle" {
             if let Some(on) = device.fan_toggle_on {
                 return client

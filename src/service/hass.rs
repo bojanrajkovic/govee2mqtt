@@ -454,7 +454,7 @@ async fn mqtt_switch_command(
 
     if instance == "powerSwitch" {
         state.device_power_on(&device, on).await?;
-    } else if instance == "fanToggle" && device.tracks_fan_state() {
+    } else if instance == "fanToggle" && device.polls_platform_state() {
         state.device_set_fan_toggle(&device, on).await?;
     } else if let Some(client) = state.get_platform_client().await {
         if let Some(http_dev) = &device.http_device_info {

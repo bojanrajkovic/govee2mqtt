@@ -241,7 +241,7 @@ impl State {
 
                 {
                     let mut device = self.device_mut(&device.sku, &device.id).await;
-                    device.record_fan_poll(&http_state, started);
+                    device.record_platform_state_poll(&http_state, started);
                     device.set_http_device_state(http_state);
                     device.set_last_polled();
                 }
@@ -263,7 +263,7 @@ impl State {
         device: &Device,
         on: bool,
     ) -> anyhow::Result<()> {
-        self.set_fan_platform_toggle(device, "fanToggle", on, Device::record_fan_toggle_command)
+        self.set_platform_toggle(device, "fanToggle", on, Device::record_fan_toggle_command)
             .await
     }
 
@@ -272,7 +272,7 @@ impl State {
         device: &Device,
         on: bool,
     ) -> anyhow::Result<()> {
-        self.set_fan_platform_toggle(
+        self.set_platform_toggle(
             device,
             "reverseAirflowToggle",
             on,
@@ -281,9 +281,9 @@ impl State {
         .await
     }
 
-    /// Sends a fan toggle over the Platform API, then records it with `record`
+    /// Sends a toggle over the Platform API, then records it with `record`
     /// so that the next poll can't restore the old value.
-    async fn set_fan_platform_toggle(
+    async fn set_platform_toggle(
         self: &Arc<Self>,
         device: &Device,
         instance: &str,
@@ -306,7 +306,7 @@ impl State {
         self.notify_of_state_change(&device.id).await
     }
 
-    pub async fn poll_fan_state(self: &Arc<Self>, device: &Device) -> anyhow::Result<()> {
+    pub async fn poll_platform_state(self: &Arc<Self>, device: &Device) -> anyhow::Result<()> {
         let (Some(client), Some(info)) =
             (self.get_platform_client().await, &device.http_device_info)
         else {
@@ -325,7 +325,7 @@ impl State {
         let changed = self
             .device_mut(&device.sku, &device.id)
             .await
-            .record_fan_poll(&http_state, started);
+            .record_platform_state_poll(&http_state, started);
         if changed {
             self.notify_of_state_change(&device.id)
                 .await
