@@ -3,12 +3,13 @@ use crate::hass_mqtt::enumerator::{enumerate_all_entites, enumerate_entities_for
 use crate::hass_mqtt::fan::{mqtt_set_fan_direction, mqtt_set_fan_percentage, mqtt_set_fan_preset};
 use crate::hass_mqtt::humidifier::{mqtt_device_set_work_mode, mqtt_humidifier_set_target};
 use crate::hass_mqtt::instance::EntityList;
+use crate::hass_mqtt::light::split_light_command;
 use crate::hass_mqtt::number::mqtt_number_command;
 use crate::hass_mqtt::select::mqtt_set_mode_scene;
 use crate::lan_api::DeviceColor;
 use crate::opt_env_var;
 use crate::platform_api::{from_json, DeviceType};
-use crate::service::device::Device as ServiceDevice;
+use crate::service::device::{Device as ServiceDevice, SplitHalf};
 use crate::service::state::StateHandle;
 use crate::temperature::TemperatureScale;
 use anyhow::Context;
@@ -212,7 +213,10 @@ pub fn light_state_topic(device: &ServiceDevice) -> String {
     format!("gv2mqtt/light/{id}/state", id = topic_safe_id(device))
 }
 
-pub fn light_segment_state_topic(device: &ServiceDevice, segment: u32) -> String {
+pub fn light_segment_state_topic(
+    device: &ServiceDevice,
+    segment: impl std::fmt::Display,
+) -> String {
     format!(
         "gv2mqtt/light/{id}/state/{segment}",
         id = topic_safe_id(device)
@@ -252,12 +256,12 @@ async fn mqtt_request_platform_data(
 }
 
 #[derive(Deserialize, Debug, Clone)]
-struct HassLightCommand {
-    state: String,
-    color_temp: Option<u32>,
-    color: Option<DeviceColor>,
-    effect: Option<String>,
-    brightness: Option<u8>,
+pub struct HassLightCommand {
+    pub state: String,
+    pub color_temp: Option<u32>,
+    pub color: Option<DeviceColor>,
+    pub effect: Option<String>,
+    pub brightness: Option<u8>,
 }
 
 /// HASS is sending a command to a light
@@ -357,9 +361,18 @@ async fn mqtt_light_segment_command(
     State(state): State<StateHandle>,
 ) -> anyhow::Result<()> {
     let device = state.resolve_device_for_control(&id).await?;
+    let command: HassLightCommand = from_json(&payload)?;
+
+    if let Some(half) = SplitHalf::from_topic_name(&segment) {
+        anyhow::ensure!(
+            device.has_split_lights(),
+            "{id} has no split lights for a {half:?} light command",
+            id = device.id
+        );
+        return split_light_command(&state, &device, half, &command).await;
+    }
     let segment: u32 = segment.parse()?;
 
-    let command: HassLightCommand = from_json(&payload)?;
     log::info!("Command for {device} segment {segment}: {payload}");
 
     if let Some(client) = state.get_platform_client().await {

@@ -283,12 +283,12 @@ impl State {
 
     /// Sends a toggle over the Platform API, then records it with `record`
     /// so that the next poll can't restore the old value.
-    async fn set_platform_toggle(
+    pub async fn set_platform_toggle(
         self: &Arc<Self>,
         device: &Device,
         instance: &str,
         on: bool,
-        record: fn(&mut Device, bool, DateTime<Utc>),
+        record: impl FnOnce(&mut Device, bool, DateTime<Utc>),
     ) -> anyhow::Result<()> {
         let (Some(client), Some(info)) =
             (self.get_platform_client().await, &device.http_device_info)

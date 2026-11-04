@@ -1,5 +1,7 @@
 use crate::hass_mqtt::base::{Device, EntityConfig, Origin};
-use crate::hass_mqtt::instance::{publish_entity_config, EntityInstance};
+use crate::hass_mqtt::instance::{
+    publish_entity_config, unpublish_replaced_entities, EntityInstance,
+};
 use crate::platform_api::{DeviceCapability, DeviceParameters};
 use crate::service::coordinator::Coordinator;
 use crate::service::device::Device as ServiceDevice;
@@ -192,23 +194,15 @@ impl FanEntity {
 impl EntityInstance for FanEntity {
     async fn publish_config(&self, state: &StateHandle, client: &HassClient) -> anyhow::Result<()> {
         // This entity replaced the Fan Speed select and the switches it
-        // controls. An empty config makes hass delete each one if it still has
-        // it from this session.
-        let disco = state.get_hass_disco_prefix().await;
-        let id = &self.topic_id;
-        let replaced = std::iter::once(("select", "fanSpeedMode")).chain(
-            self.replaced_switch_instances()
-                .iter()
-                .map(|i| ("switch", *i)),
-        );
-        for (integration, instance) in replaced {
-            client
-                .publish(
-                    format!("{disco}/{integration}/gv2mqtt-{id}-{instance}/config"),
-                    "",
-                )
-                .await?;
-        }
+        // controls.
+        let replaced: Vec<(&str, &str)> = std::iter::once(("select", "fanSpeedMode"))
+            .chain(
+                self.replaced_switch_instances()
+                    .iter()
+                    .map(|i| ("switch", *i)),
+            )
+            .collect();
+        unpublish_replaced_entities(state, client, &self.topic_id, &replaced).await?;
 
         publish_entity_config("fan", state, client, &self.fan.base, &self.fan).await
     }

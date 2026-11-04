@@ -50,6 +50,10 @@ pub struct Device {
     pub fan_toggle_on: Option<bool>,
     /// The last known reverseAirflowToggle state, from a command or a platform poll.
     pub fan_reverse_airflow_on: Option<bool>,
+    /// The last known mainLightToggle state, from a command or a platform poll.
+    pub main_light_on: Option<bool>,
+    /// The last known backgroundLightToggle state, from a command or a platform poll.
+    pub background_light_on: Option<bool>,
     /// When the last platform state poll started, whether or not it succeeded.
     pub last_platform_state_poll: Option<DateTime<Utc>>,
     /// When the platform API last accepted a command from the bridge.
@@ -548,14 +552,59 @@ impl Device {
         let is_on = |instance| numeric_value(instance).map(|value| value.as_i64() != Some(0));
         let toggle = is_on("fanToggle").or(self.fan_toggle_on);
         let reverse_airflow = is_on("reverseAirflowToggle").or(self.fan_reverse_airflow_on);
+        let main_light = is_on("mainLightToggle").or(self.main_light_on);
+        let background_light = is_on("backgroundLightToggle").or(self.background_light_on);
 
         let changed = speed != self.fan_speed_mode
             || toggle != self.fan_toggle_on
-            || reverse_airflow != self.fan_reverse_airflow_on;
+            || reverse_airflow != self.fan_reverse_airflow_on
+            || main_light != self.main_light_on
+            || background_light != self.background_light_on;
         self.fan_speed_mode = speed;
         self.fan_toggle_on = toggle;
         self.fan_reverse_airflow_on = reverse_airflow;
+        self.main_light_on = main_light;
+        self.background_light_on = background_light;
         changed
+    }
+
+    /// True for devices that hass shows as two lights, one per half. Only the
+    /// Platform API can address one half, and only its poll reports which
+    /// half is on. Each half needs its toggle and the segment controls.
+    pub fn has_split_lights(&self) -> bool {
+        self.polls_platform_state()
+            && SplitHalf::ALL
+                .map(SplitHalf::toggle_instance)
+                .into_iter()
+                .chain(["segmentedBrightness", "segmentedColorRgb"])
+                .all(|instance| self.get_capability_by_instance(instance).is_some())
+    }
+
+    pub fn split_light_on(&self, half: SplitHalf) -> Option<bool> {
+        match half {
+            SplitHalf::Main => self.main_light_on,
+            SplitHalf::Background => self.background_light_on,
+        }
+    }
+
+    fn split_light_on_mut(&mut self, half: SplitHalf) -> &mut Option<bool> {
+        match half {
+            SplitHalf::Main => &mut self.main_light_on,
+            SplitHalf::Background => &mut self.background_light_on,
+        }
+    }
+
+    pub fn record_split_light_command(&mut self, half: SplitHalf, on: bool, now: DateTime<Utc>) {
+        *self.split_light_on_mut(half) = Some(on);
+        self.last_platform_command = Some(now);
+    }
+
+    /// Marks a half's state as unknown, before a command that may change it as
+    /// a side effect. Polls that started before the command are ignored, so
+    /// the next poll after it fills the state in.
+    pub fn forget_split_light_state(&mut self, half: SplitHalf, now: DateTime<Utc>) {
+        *self.split_light_on_mut(half) = None;
+        self.last_platform_command = Some(now);
     }
 
     /// Setting a speed also turns the fan on.
@@ -676,6 +725,55 @@ impl Device {
 
     pub fn is_controllable(&self) -> bool {
         !matches!(self.is_ble_only_device(), Some(true))
+    }
+}
+
+/// One of the H1310's two lights. Each has its own on/off toggle and its own
+/// segments for brightness and color. Color temperature and scenes have no
+/// per-half control, and setting either one changes both halves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitHalf {
+    Main,
+    Background,
+}
+
+impl SplitHalf {
+    pub const ALL: [Self; 2] = [Self::Main, Self::Background];
+
+    pub fn toggle_instance(self) -> &'static str {
+        match self {
+            Self::Main => "mainLightToggle",
+            Self::Background => "backgroundLightToggle",
+        }
+    }
+
+    /// Segment 0 is the whole main light. Segments 1-8 are the background
+    /// ring, in eight equal pieces.
+    pub fn segments(self) -> &'static [u32] {
+        match self {
+            Self::Main => &[0],
+            Self::Background => &[1, 2, 3, 4, 5, 6, 7, 8],
+        }
+    }
+
+    /// The other half, which a color temperature or scene change also affects.
+    pub fn other(self) -> Self {
+        match self {
+            Self::Main => Self::Background,
+            Self::Background => Self::Main,
+        }
+    }
+
+    /// The name used in MQTT topics and unique ids.
+    pub fn topic_name(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Background => "background",
+        }
+    }
+
+    pub fn from_topic_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|half| half.topic_name() == name)
     }
 }
 
@@ -865,6 +963,73 @@ mod test {
         assert!(!device.record_platform_state_poll(&h1310_poll(json!(1), json!(1)), Utc::now()));
         assert_eq!(device.fan_speed_mode, None);
         assert_eq!(device.fan_toggle_on, None);
+    }
+
+    fn with_light_toggles(
+        mut poll: HttpDeviceState,
+        main: JsonValue,
+        background: JsonValue,
+    ) -> HttpDeviceState {
+        for (half, value) in [(SplitHalf::Main, main), (SplitHalf::Background, background)] {
+            poll.capabilities.push(DeviceCapabilityState {
+                kind: DeviceCapabilityKind::Toggle,
+                instance: half.toggle_instance().to_string(),
+                state: json!({ "value": value }),
+            });
+        }
+        poll
+    }
+
+    #[test]
+    fn platform_state_poll_sets_split_lights() {
+        let mut device = h1310_fan();
+        assert!(device.has_split_lights());
+
+        let poll = with_light_toggles(h1310_poll(json!(1), json!(1)), json!(1), json!(0));
+        assert!(device.record_platform_state_poll(&poll, Utc::now()));
+        assert_eq!(device.split_light_on(SplitHalf::Main), Some(true));
+        assert_eq!(device.split_light_on(SplitHalf::Background), Some(false));
+
+        // The Platform API sometimes returns empty values.
+        let poll = with_light_toggles(h1310_poll(json!(1), json!(1)), json!(""), json!(""));
+        assert!(!device.record_platform_state_poll(&poll, Utc::now()));
+        assert_eq!(device.split_light_on(SplitHalf::Main), Some(true));
+        assert_eq!(device.split_light_on(SplitHalf::Background), Some(false));
+    }
+
+    #[test]
+    fn poll_soon_after_split_light_command_is_ignored() {
+        let mut device = h1310_fan();
+        let now = Utc::now();
+        device.record_split_light_command(SplitHalf::Background, true, now);
+
+        let stale = with_light_toggles(h1310_poll(json!(1), json!(1)), json!(1), json!(0));
+        assert!(!device.record_platform_state_poll(&stale, now));
+        assert_eq!(device.split_light_on(SplitHalf::Background), Some(true));
+
+        // A scene or color temperature change on the main light.
+        device.forget_split_light_state(SplitHalf::Background, now);
+        assert!(!device.record_platform_state_poll(&stale, now));
+        assert_eq!(device.split_light_on(SplitHalf::Background), None);
+    }
+
+    #[test]
+    fn split_lights_need_both_toggles() {
+        let mut device = h1310_fan();
+        let info = device.http_device_info.as_mut().unwrap();
+        info.capabilities
+            .retain(|c| c.instance != "backgroundLightToggle");
+        assert!(!device.has_split_lights());
+
+        let mut device = h1310_fan();
+        let info = device.http_device_info.as_mut().unwrap();
+        info.capabilities
+            .retain(|c| c.instance != "segmentedColorRgb");
+        assert!(!device.has_split_lights());
+
+        let mut other = h1310_fan();
+        other.sku = "H1370".to_string();
+        assert!(!other.has_split_lights());
     }
 
     #[test]
