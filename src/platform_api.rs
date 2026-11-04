@@ -1120,8 +1120,7 @@ mod test {
 
     #[test]
     fn only_the_h1310_fan_speed_mode_is_excluded_from_scenes() {
-        let info: HttpDeviceInfo =
-            from_json(include_str!("../test-data/h1310_fan_speed.json")).unwrap();
+        let info: HttpDeviceInfo = from_json(include_str!("../test-data/h1310.json")).unwrap();
         let cap = info.capability_by_instance("fanSpeedMode").unwrap();
         assert!(is_h1310_fan_speed_mode("H1310", cap));
         assert!(!is_h1310_fan_speed_mode("H1370", cap));

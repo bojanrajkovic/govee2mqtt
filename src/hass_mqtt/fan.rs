@@ -356,8 +356,7 @@ mod test {
     use std::sync::Arc;
 
     fn h1310() -> (ServiceDevice, DeviceCapability) {
-        let info: HttpDeviceInfo =
-            from_json(include_str!("../../test-data/h1310_fan_speed.json")).unwrap();
+        let info: HttpDeviceInfo = from_json(include_str!("../../test-data/h1310.json")).unwrap();
         let cap = info.capability_by_instance("fanSpeedMode").unwrap().clone();
         let mut device = ServiceDevice::new("H1310", &info.device);
         device.http_device_info = Some(info);

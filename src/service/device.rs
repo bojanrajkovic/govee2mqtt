@@ -606,18 +606,16 @@ impl Device {
     }
 
     pub fn get_color_temperature_range(&self) -> Option<(u32, u32)> {
-        if let Some(quirk) = self.resolve_quirk() {
+        if let Some(quirk) = resolve_quirk(&self.sku) {
             return quirk.color_temp_range;
         }
 
-        if self.lan_device.is_some() {
-            // LAN API support suggests that it is a light
-            return Some((2000, 9000));
-        }
-
+        // The device's own range beats the guess in the placeholder quirk that
+        // `resolve_quirk` makes for unknown LAN devices.
         self.http_device_info
             .as_ref()
             .and_then(|info| info.get_color_temperature_range())
+            .or_else(|| self.resolve_quirk()?.color_temp_range)
     }
 
     pub fn supports_brightness(&self) -> bool {
@@ -690,7 +688,7 @@ mod test {
     fn h1310_fan() -> Device {
         let mut device = Device::new("H1310", "AA:BB:CC:DD:EE:FF:00:01");
         device.http_device_info =
-            Some(from_json(include_str!("../../test-data/h1310_fan_speed.json")).unwrap());
+            Some(from_json(include_str!("../../test-data/h1310.json")).unwrap());
         device
     }
 
@@ -867,6 +865,26 @@ mod test {
         assert!(!device.record_platform_state_poll(&h1310_poll(json!(1), json!(1)), Utc::now()));
         assert_eq!(device.fan_speed_mode, None);
         assert_eq!(device.fan_toggle_on, None);
+    }
+
+    #[test]
+    fn lan_device_uses_reported_color_temperature_range() {
+        let mut device = h1310_fan();
+        device.lan_device = Some(
+            serde_json::from_value(json!({
+                "device": device.id,
+                "sku": "H1310",
+                "bleVersionHard": "",
+                "bleVersionSoft": "",
+                "wifiVersionHard": "",
+                "wifiVersionSoft": "",
+            }))
+            .unwrap(),
+        );
+        assert_eq!(device.get_color_temperature_range(), Some((2700, 6500)));
+
+        device.http_device_info = None;
+        assert_eq!(device.get_color_temperature_range(), Some((2000, 9000)));
     }
 
     #[test]
