@@ -488,7 +488,7 @@ impl GoveeApiClient {
     pub async fn set_segment_rgb(
         &self,
         device: &HttpDeviceInfo,
-        segment: u32,
+        segments: &[u32],
         r: u8,
         g: u8,
         b: u8,
@@ -501,7 +501,7 @@ impl GoveeApiClient {
             device,
             cap,
             json!({
-                "segment": vec![segment],
+                "segment": segments,
                 "rgb": value,
             }),
         )
@@ -511,7 +511,7 @@ impl GoveeApiClient {
     pub async fn set_segment_brightness(
         &self,
         device: &HttpDeviceInfo,
-        segment: u32,
+        segments: &[u32],
         percent: u8,
     ) -> anyhow::Result<ControlDeviceResponseCapability> {
         let cap = device
@@ -528,7 +528,7 @@ impl GoveeApiClient {
             device,
             cap,
             json!({
-                "segment": vec![segment],
+                "segment": segments,
                 "brightness": value,
             }),
         )

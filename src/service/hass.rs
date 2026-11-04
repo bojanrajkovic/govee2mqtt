@@ -372,7 +372,7 @@ async fn mqtt_light_segment_command(
 
         if let Some(brightness) = command.brightness {
             client
-                .set_segment_brightness(info, segment, brightness)
+                .set_segment_brightness(info, &[segment], brightness)
                 .await?;
         } else if command.state == "OFF" {
             // Do nothing here. We used to set brightness to zero,
@@ -386,7 +386,7 @@ async fn mqtt_light_segment_command(
         }
         if let Some(color) = &command.color {
             client
-                .set_segment_rgb(info, segment, color.r, color.g, color.b)
+                .set_segment_rgb(info, &[segment], color.r, color.g, color.b)
                 .await?;
         }
     } else {
